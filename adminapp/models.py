@@ -33,8 +33,6 @@ class Plan(models.Model):
     price = models.FloatField()
 
 
-
-
 class Trainer(models.Model):
     name = models.CharField(max_length=255)
     specialization = models.CharField(max_length=255, blank=True, null=True)
@@ -45,15 +43,12 @@ class Trainer(models.Model):
     join_date = models.CharField(max_length=50, blank=True, null=True)
 
 
-
-
 class Branch(models.Model):
     name = models.CharField(max_length=255)
     location = models.CharField(max_length=255)
     manager_name = models.CharField(max_length=255, blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     capacity = models.IntegerField(blank=True, null=True)
-
 
 
 
@@ -67,7 +62,6 @@ class Payment(models.Model):
     payment_date = models.CharField(max_length=50)
     payment_method = models.CharField(max_length=100, blank=True, null=True)
     type = models.CharField(max_length=100, blank=True, null=True)
-
 
 
 
@@ -86,7 +80,6 @@ class TrainerPayment(models.Model):
 
 
 
-
-class Setting(models.Model):
-    key = models.CharField(max_length=255, primary_key=True)
-    value = models.TextField()
+# class Setting(models.Model):
+#     key = models.CharField(max_length=255, primary_key=True)
+#     value = models.TextField()

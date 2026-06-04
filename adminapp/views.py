@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Trainer, TrainerPayment
+from .models import Branch, Trainer, TrainerPayment
 from .models import Member
 import json
 from datetime import datetime
@@ -50,7 +50,7 @@ def create_member(request):
 @csrf_exempt
 def get_members(request):
     if request.method == "GET":
-        members = list(Member.objects.values())
+        members = list(Member.objects.order_by('id').values())
         return JsonResponse(members, safe=False)
     
 
@@ -150,7 +150,7 @@ def create_trainer(request):
 @csrf_exempt
 def get_trainers(request):
     if request.method == "GET":
-        trainers = list(Trainer.objects.values())
+        trainers = list(Trainer.objects.order_by('id').values())
         return JsonResponse(trainers, safe=False)
 
 @csrf_exempt
@@ -262,7 +262,7 @@ def create_plan(request):
 @csrf_exempt
 def get_plans(request):
     if request.method == "GET":
-        plans = list(Plan.objects.values())
+        plans = list(Plan.objects.order_by('id').values())
         return JsonResponse(plans, safe=False)
 
 
@@ -303,66 +303,45 @@ def delete_plan(request, plan_id):
             return JsonResponse({"error": "Plan not found"},status=404)
         
 
-        from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import Branch
-import json
+
+@csrf_exempt
+def create_branch(request):
+    if request.method == "POST":
+
+        branch = Branch.objects.create(
+            name=request.POST.get("name"),
+            location=request.POST.get("location"),
+            manager_name=request.POST.get("manager_name"),
+            phone=request.POST.get("phone"),
+            capacity=request.POST.get("capacity")
+        )
+
+        return JsonResponse({"message": "success"})
 
 
 @csrf_exempt
 def get_branches(request):
     if request.method == "GET":
-        branches = list(Branch.objects.values())
+        branches = list(Branch.objects.order_by('id').values())
         return JsonResponse(branches, safe=False)
 
 
 @csrf_exempt
-def create_branch(request):
-    if request.method == "POST":
-        data = json.loads(request.body)
-
-        branch = Branch.objects.create(
-            name=data.get("name"),
-            location=data.get("location"),
-            manager_name=data.get("manager_name"),
-            phone=data.get("phone"),
-            capacity=data.get("capacity")
-        )
-
-        return JsonResponse({"message": "success"})
-            # "id": branch.id,
-            # "name": branch.name,
-            # "location": branch.location,
-            # "manager_name": branch.manager_name,
-            # "phone": branch.phone,
-            # "capacity": branch.capacity
-        # })
-
-
-@csrf_exempt
 def update_branch(request, branch_id):
-    if request.method == "PUT":
+    if request.method == "POST":
         try:
             branch = Branch.objects.get(id=branch_id)
         except Branch.DoesNotExist:
-            return JsonResponse(
-                {"error": "Branch not found"},
-                status=404
-            )
+            return JsonResponse({"message": "Branch not found"},status=404)
 
-        data = json.loads(request.body)
-
-        branch.name = data.get("name")
-        branch.location = data.get("location")
-        branch.manager_name = data.get("manager_name")
-        branch.phone = data.get("phone")
-        branch.capacity = data.get("capacity")
-
+        branch.name = request.POST.get("name")
+        branch.location = request.POST.get("location")
+        branch.manager_name = request.POST.get("manager_name")
+        branch.phone = request.POST.get("phone")
+        branch.capacity = request.POST.get("capacity")
         branch.save()
 
-        return JsonResponse({
-            "message": "Branch updated successfully"
-        })
+    return JsonResponse({"message": "Branch updated successfully"})
 
 
 @csrf_exempt
@@ -372,12 +351,66 @@ def delete_branch(request, branch_id):
             branch = Branch.objects.get(id=branch_id)
             branch.delete()
 
-            return JsonResponse({
-                "message": "Branch deleted successfully"
-            })
+            return JsonResponse({"message": "Branch deleted successfully"})
 
         except Branch.DoesNotExist:
-            return JsonResponse(
-                {"error": "Branch not found"},
-                status=404
-            )
+            return JsonResponse({"error": "Branch not found"},status=404)
+
+from django.db.models import Sum
+from datetime import date, timedelta
+
+
+@csrf_exempt
+def get_dashboard_stats(request):
+    if request.method == "GET":
+
+        total_members = Member.objects.count()
+
+        active_members = Member.objects.filter(status="Active").count()
+
+        pending_payments = Member.objects.filter(due_amount__gt=0).count()
+
+        today = date.today()
+        next_week = today + timedelta(days=7)
+
+        expiries = Member.objects.filter(
+            expiry_date__range=[today, next_week]
+        ).order_by('expiry_date')
+
+        upcoming_expiries_list = [
+            {
+                "name": member.name,
+                "expiry_date": member.expiry_date
+            }
+            for member in expiries
+        ]
+
+        trainers_count = Trainer.objects.count()
+
+        total_revenue = (Member.objects.aggregate(total=Sum('paid_amount'))['total'] or 0)
+
+        recent = Member.objects.order_by('-id')[:5]
+
+        recent_registrations = [
+            {
+                "name": member.name,
+                "plan": member.plan,
+                "photo": member.photo,
+                "join_date": member.join_date
+            }
+            for member in recent
+        ]
+
+        return JsonResponse({
+            "total_members": total_members,
+            "active_members": active_members,
+            "active_members_growth": "+5.2%",
+            "trainers_count": trainers_count,
+            "trainers_growth": "+2",
+            "total_income": total_revenue,
+            "revenue_growth": "+12%",
+            "pending_payments": pending_payments,
+            "upcoming_expiries": len(upcoming_expiries_list),
+            "upcoming_expiries_list": upcoming_expiries_list,
+            "recent_registrations": recent_registrations
+        })
