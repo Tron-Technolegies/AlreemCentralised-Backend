@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Trainer, TrainerPayment
+from .models import Branch, Payment, Trainer, TrainerPayment
 from .models import Member
 import json
 from datetime import datetime
@@ -136,7 +136,7 @@ def create_trainer(request):
             experience=request.POST.get("experience"),
             salary=request.POST.get("salary"),
             join_date=request.POST.get("join_date"),
-            photo=request.FILES.get("photo")  # file upload
+            photo=request.FILES.get("photo")  
         )
 
         return JsonResponse({
@@ -154,16 +154,13 @@ def get_trainers(request):
         return JsonResponse(trainers, safe=False)
 
 @csrf_exempt
-def get_trainer(request, trainer_id):
+def get_single_trainer(request, trainer_id):
     if request.method == "GET":
         try:
             trainer = Trainer.objects.values().get(id=trainer_id)
             return JsonResponse(trainer, safe=False)
         except Trainer.DoesNotExist:
-            return JsonResponse(
-                {"error": "Trainer not found"},
-                status=404
-            )
+            return JsonResponse({"error": "Trainer not found"},status=404)
 
 
 @csrf_exempt
@@ -211,14 +208,24 @@ def delete_trainer(request, trainer_id):
 
 
 @csrf_exempt
-def get_trainer_payments(request, trainer_id):
+def get_trainer_payments(request):
     if request.method == "GET":
-        payments = list(
-            TrainerPayment.objects.filter(trainer_id=trainer_id).values()
-        )
-        return JsonResponse(payments, safe=False)
+        payments = TrainerPayment.objects.all().values()
+        return JsonResponse(list(payments), safe=False)
 
     return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+@csrf_exempt
+def get_single_trainer_payment(request,trainer_id):
+    if request.method == "GET":
+        try:
+            trainer=TrainerPayment.objects.values().get(id=trainer_id)
+            return JsonResponse(trainer,safe=False)
+        except TrainerPayment.DoesNotExist:
+            return JsonResponse({"error": "Trainer not found"},status=404)
+
+
 
 @csrf_exempt
 def add_trainer_payment(request, trainer_id):
@@ -413,4 +420,121 @@ def get_dashboard_stats(request):
             "upcoming_expiries": len(upcoming_expiries_list),
             "upcoming_expiries_list": upcoming_expiries_list,
             "recent_registrations": recent_registrations
+        })
+
+
+
+
+@csrf_exempt
+def pause_member(request, member_id):
+    if request.method == "POST":
+        try:
+            member = Member.objects.get(id=member_id)
+        except Member.DoesNotExist:
+            return JsonResponse({"message": "Member not found"},status=404)
+
+        if member.status == "Paused":
+            return JsonResponse({"message": "Member is already paused"},status=400)
+
+        member.status = "Paused"
+        member.pause_start_date = date.today()
+        member.save()
+
+        return JsonResponse({
+            "message": "Membership paused",
+            "status": "Paused"
+        })
+    
+
+
+
+@csrf_exempt
+def resume_member(request, member_id):
+    if request.method == "POST":
+        try:
+            member = Member.objects.get(id=member_id)
+        except Member.DoesNotExist:
+            return JsonResponse(
+                {"message": "Member not found"},
+                status=404
+            )
+
+        if member.status != "Paused":
+            return JsonResponse({"message": "Member is not paused"},status=400)
+
+        days_paused = (
+            date.today() - member.pause_start_date
+        ).days
+
+        member.expiry_date = (
+            member.expiry_date +
+            timedelta(days=days_paused)
+        )
+
+        member.status = "Active"
+        member.pause_start_date = None
+        member.save()
+
+        return JsonResponse({
+            "message": "Membership resumed",
+            "status": "Active",
+            "new_expiry_date": member.expiry_date
+        })
+    
+@csrf_exempt
+def add_payment(request, member_id):
+    if request.method == "POST":
+
+        Payment.objects.create(
+            member_id=member_id,
+            amount=request.POST.get("amount"),
+            payment_date=request.POST.get("payment_date"),
+            payment_method=request.POST.get("payment_method"),
+            type=request.POST.get("type")
+        )
+
+        return JsonResponse({"message": "Payment recorded successfully"})
+
+    return JsonResponse({"error": "Invalid request method"},status=405)
+    
+
+
+def get_single_payment(request, member_id):
+    payments = Payment.objects.filter(member_id=member_id).values()
+
+    return JsonResponse(list(payments),safe=False)
+
+
+
+def get_payments(request):
+    print("GET PAYMENTS CALLED")
+
+    payments=Payment.objects.all().values()
+
+    return JsonResponse(list(payments),safe=False)
+
+
+@csrf_exempt
+def renew_member(request, member_id):
+    if request.method == "POST":
+        try:
+            member = Member.objects.get(id=member_id)
+        except Member.DoesNotExist:
+            return JsonResponse({"message": "Member not found"},status=404)
+
+        duration = int(
+            request.POST.get("duration")
+        )
+
+        member.expiry_date = (
+            member.expiry_date +
+            timedelta(days=duration)
+        )
+
+        member.status = "Active"
+        member.save()
+
+        return JsonResponse({
+            "message": "Membership renewed",
+            "new_expiry_date": member.expiry_date
         })

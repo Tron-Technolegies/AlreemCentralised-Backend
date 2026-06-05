@@ -20,10 +20,9 @@ class Member(models.Model):
     adhaar_number = models.CharField(max_length=50, blank=True, null=True)
     paid_amount = models.FloatField(blank=True, null=True)
     due_amount = models.FloatField(blank=True, null=True)
-    expiry_date = models.CharField(max_length=50, blank=True, null=True)
+    expiry_date = models.DateField(blank=True,null=True)
     gender = models.CharField(max_length=20, blank=True, null=True)
-    pause_start_date = models.CharField(max_length=50, blank=True, null=True)
-
+    pause_start_date = models.DateField(blank=True,null=True)
 
 
 
