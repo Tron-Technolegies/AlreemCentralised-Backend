@@ -51,17 +51,44 @@ class Branch(models.Model):
 
 
 
-class Payment(models.Model):
-    member = models.ForeignKey(
-        Member,
-        on_delete=models.CASCADE,
-        db_column='member_id'
-    )
-    amount = models.FloatField()
-    payment_date = models.CharField(max_length=50)
-    payment_method = models.CharField(max_length=100, blank=True, null=True)
-    type = models.CharField(max_length=100, blank=True, null=True)
+# class Payment(models.Model):
+#     member = models.ForeignKey(
+#         Member,
+#         on_delete=models.CASCADE,
+#         db_column='member_id'
+#     )
+#     amount = models.FloatField()
+#     payment_date = models.CharField(max_length=50)
+#     payment_method = models.CharField(max_length=100, blank=True, null=True)
+#     type = models.CharField(max_length=100, blank=True, null=True)
 
+
+class Payment(models.Model):
+    member = models.ForeignKey(Member, on_delete=models.CASCADE, db_column='member_id')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_date = models.DateField()
+    payment_method = models.CharField(max_length=100, blank=True, null=True)
+    payment_type = models.CharField(max_length=100, blank=True, null=True)
+
+
+
+class Expense(models.Model):
+
+    CATEGORY_CHOICES = [
+        ("salary", "Salary"),
+        ("rent", "Rent"),
+        ("utilities", "Utilities"),
+        ("maintenance", "Maintenance"),
+        ("marketing", "Marketing"),
+        ("equipment", "Equipment"),
+        ("misc", "Miscellaneous"),
+    ]
+
+    title = models.CharField(max_length=100)
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    date = models.DateField()
+    description = models.TextField(blank=True, null=True)
 
 
 class TrainerPayment(models.Model):

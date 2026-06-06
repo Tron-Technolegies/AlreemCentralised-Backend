@@ -12,13 +12,13 @@ urlpatterns = [
 
     path('trainers/', views.get_trainers,name="get_trainers"),
     path('trainers/payments/', views.get_trainer_payments, name="get_trainer_payments"),
-    path('trainers/create/', views.create_trainer),
+    path('trainers/create/', views.create_trainer,name="create_trainer"),
     path('trainers/<str:trainer_id>/', views.get_single_trainer, name='get_trainer'),
-    path('trainers/<int:trainer_id>/update/', views.update_trainer),
-    path('trainers/<int:trainer_id>/delete/', views.delete_trainer),
+    path('trainers/<int:trainer_id>/update/', views.update_trainer,name="update_trainer"),
+    path('trainers/<int:trainer_id>/delete/', views.delete_trainer,name="delete_trainer"),
 
-    path('trainers/<int:trainer_id>/payments/add/', views.add_trainer_payment),
-    path('trainers/<int:trainer_id>/single_payments/', views.get_single_trainer_payment),
+    path('trainers/<int:trainer_id>/payments/add/', views.add_trainer_payment,name="add_trainer_payment"),
+    path('trainers/<int:trainer_id>/single_payments/', views.get_single_trainer_payment,name="get_single_trainer_payment"),
 
     path('plans/', views.get_plans, name='get_plans'),
     path('plans/create/', views.create_plan, name='create_plan'),
@@ -36,8 +36,14 @@ urlpatterns = [
 
     path('members/<str:member_id>/payments/add/', views.add_payment, name='add_payment'),
     path('members/<str:member_id>/single_payment/', views.get_single_payment, name='get_single_payment'),
-
     path('members/<str:member_id>/renew/', views.renew_member, name='renew_member'),
+
+    path('expenses/', views.add_expense, name='add_expense'),
+    path('view_expenses/', views.view_expenses, name='view_expenses'),
+    path('blocked_members/', views.get_blocked_members, name='blocked_members'),
+
+
+
     # path('members/next-id/generate/', views.get_next_member_id, name='get_next_member_id'),
 
 ] 

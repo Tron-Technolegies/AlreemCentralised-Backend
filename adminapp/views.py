@@ -1,7 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Payment, Trainer, TrainerPayment
-from .models import Member
+from .models import Branch, Expense, Payment, Trainer, TrainerPayment, Member,Expense
 import json
 from datetime import datetime
 
@@ -47,10 +46,24 @@ def create_member(request):
         })
     
 
+from datetime import date, timedelta
+
 @csrf_exempt
 def get_members(request):
     if request.method == "GET":
-        members = list(Member.objects.order_by('id').values())
+
+        today = date.today()
+
+        # Block members 7 days after expiry
+        Member.objects.filter(
+            expiry_date__lt=today - timedelta(days=7),
+            status="Active"
+        ).update(status="Blocked")
+
+        members = list(
+            Member.objects.order_by('id').values()
+        )
+
         return JsonResponse(members, safe=False)
     
 
@@ -61,8 +74,7 @@ def get_member(request, member_id):
             member = Member.objects.values().get(id=member_id)
             return JsonResponse(member)
         except Member.DoesNotExist:
-            return JsonResponse(
-                {"error": "Member not found"},status=404)
+            return JsonResponse({"error": "Member not found"},status=404)
 
 
 @csrf_exempt
@@ -88,7 +100,7 @@ def update_member(request, member_id):
         member.gender = request.POST.get("gender")
         member.paid_amount = request.POST.get("paid_amount")
         member.due_amount = request.POST.get("due_amount")
-        member.expiry_date = request.POST.get("expiry_date")
+        # member.expiry_date = request.POST.get("expiry_date")
 
         if request.POST.get("status"):
             member.status = request.POST.get("status")
@@ -100,10 +112,9 @@ def update_member(request, member_id):
 
         return JsonResponse({"message": "Member updated successfully"})
 
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=405
-    )
+    return JsonResponse({"error": "Invalid request method"},status=405)
+
+
 
 @csrf_exempt
 def delete_member(request, member_id):
@@ -112,15 +123,10 @@ def delete_member(request, member_id):
             member = Member.objects.get(id=member_id)
             member.delete()
 
-            return JsonResponse({
-                "message": "Member deleted successfully"
-            })
+            return JsonResponse({"message": "Member deleted successfully"})
 
         except Member.DoesNotExist:
-            return JsonResponse(
-                {"error": "Member not found"},
-                status=404
-            )
+            return JsonResponse({"error": "Member not found"},status=404)
 
 
 # ..............................TRAINER 
@@ -186,8 +192,7 @@ def update_trainer(request, trainer_id):
             return JsonResponse({"message": "Trainer updated"})
 
         except Trainer.DoesNotExist:
-            return JsonResponse(
-                {"error": "Trainer not found"},status=404)
+            return JsonResponse({"error": "Trainer not found"},status=404)
 
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
@@ -351,6 +356,7 @@ def update_branch(request, branch_id):
     return JsonResponse({"message": "Branch updated successfully"})
 
 
+
 @csrf_exempt
 def delete_branch(request, branch_id):
     if request.method == "DELETE":
@@ -371,58 +377,115 @@ from datetime import date, timedelta
 def get_dashboard_stats(request):
     if request.method == "GET":
 
-        total_members = Member.objects.count()
-
-        active_members = Member.objects.filter(status="Active").count()
-
-        pending_payments = Member.objects.filter(due_amount__gt=0).count()
-
         today = date.today()
-        next_week = today + timedelta(days=7)
+        blocked_members = Member.objects.filter(
+    status="Blocked"
+).count()
 
-        expiries = Member.objects.filter(
-            expiry_date__range=[today, next_week]
-        ).order_by('expiry_date')
+        total_members = Member.objects.count()
+        active_members = Member.objects.filter(status="Active").count()
+        pending_payments = Member.objects.filter(due_amount__gt=0).count()
+        next_week = today + timedelta(days=7)
+        expiries = Member.objects.filter(expiry_date__range=[today, next_week]).order_by('expiry_date')
 
         upcoming_expiries_list = [
             {
-                "name": member.name,
-                "expiry_date": member.expiry_date
+                "name": m.name,
+                "expiry_date": m.expiry_date
             }
-            for member in expiries
+            for m in expiries
         ]
-
-        trainers_count = Trainer.objects.count()
-
-        total_revenue = (Member.objects.aggregate(total=Sum('paid_amount'))['total'] or 0)
 
         recent = Member.objects.order_by('-id')[:5]
 
         recent_registrations = [
             {
-                "name": member.name,
-                "plan": member.plan,
-                "photo": member.photo,
-                "join_date": member.join_date
+                "name": m.name,
+                "plan": m.plan,
+                # "photo": m.photo.url if m.photo else None,
+                "join_date": m.join_date
             }
-            for member in recent
+            for m in recent
         ]
+
+        trainers_count = Trainer.objects.count()
+
+# ...........................INCOME
+
+        total_income = Payment.objects.aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+        today_income = Payment.objects.filter(
+            payment_date=today
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        monthly_income = Payment.objects.filter(
+            payment_date__year=today.year,
+            payment_date__month=today.month
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+#........................EXPENSE 
+
+        total_expense = Expense.objects.aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+        today_expense = Expense.objects.filter(
+            date=today
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        monthly_expense = Expense.objects.filter(
+            date__year=today.year,
+            date__month=today.month
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+# .............................LOSS AND PROFIT
+
+        today_profit = max(today_income - today_expense, 0)
+        total_profit = max(total_income - total_expense, 0)
+        monthly_profit = max(monthly_income - monthly_expense, 0)
+        today_loss = max(today_expense - today_income, 0)
+        total_loss = max(total_expense - total_income, 0)
+        monthly_loss = max(monthly_expense - monthly_income, 0)
+        net_profit = total_profit
 
         return JsonResponse({
             "total_members": total_members,
             "active_members": active_members,
+            "blocked_members": blocked_members,
             "active_members_growth": "+5.2%",
+
             "trainers_count": trainers_count,
             "trainers_growth": "+2",
-            "total_income": total_revenue,
+
+            "total_income": total_income,
+            "today_income": today_income,
+            "monthly_income": monthly_income,
+
+            "total_expense": total_expense,
+            "today_expense": today_expense,
+            "monthly_expense": monthly_expense,
+
+            "today_profit": today_profit,
+            "total_profit": total_profit,
+            "monthly_profit":monthly_profit,
+
+            "today_loss": today_loss,
+            "total_loss": total_loss,
+            "monthly_loss":monthly_loss,
+
+            "net_profit": net_profit,
+
             "revenue_growth": "+12%",
+            "expense_growth": "+8%",
+            "profit_growth": "+15%",
+
             "pending_payments": pending_payments,
             "upcoming_expiries": len(upcoming_expiries_list),
             "upcoming_expiries_list": upcoming_expiries_list,
             "recent_registrations": recent_registrations
         })
-
-
 
 
 @csrf_exempt
@@ -481,6 +544,8 @@ def resume_member(request, member_id):
             "new_expiry_date": member.expiry_date
         })
     
+
+    
 @csrf_exempt
 def add_payment(request, member_id):
     if request.method == "POST":
@@ -490,7 +555,7 @@ def add_payment(request, member_id):
             amount=request.POST.get("amount"),
             payment_date=request.POST.get("payment_date"),
             payment_method=request.POST.get("payment_method"),
-            type=request.POST.get("type")
+            payment_type=request.POST.get("type")
         )
 
         return JsonResponse({"message": "Payment recorded successfully"})
@@ -501,17 +566,13 @@ def add_payment(request, member_id):
 
 def get_single_payment(request, member_id):
     payments = Payment.objects.filter(member_id=member_id).values()
-
     return JsonResponse(list(payments),safe=False)
-
 
 
 def get_payments(request):
-    print("GET PAYMENTS CALLED")
-
     payments=Payment.objects.all().values()
-
     return JsonResponse(list(payments),safe=False)
+
 
 
 @csrf_exempt
@@ -522,14 +583,13 @@ def renew_member(request, member_id):
         except Member.DoesNotExist:
             return JsonResponse({"message": "Member not found"},status=404)
 
-        duration = int(
-            request.POST.get("duration")
-        )
+        duration = int(request.POST.get("duration"))
+        today = date.today()
 
-        member.expiry_date = (
-            member.expiry_date +
-            timedelta(days=duration)
-        )
+        if member.expiry_date and member.expiry_date > today:
+            member.expiry_date += timedelta(days=duration)
+        else:
+            member.expiry_date = today + timedelta(days=duration)
 
         member.status = "Active"
         member.save()
@@ -538,3 +598,39 @@ def renew_member(request, member_id):
             "message": "Membership renewed",
             "new_expiry_date": member.expiry_date
         })
+
+
+
+
+@csrf_exempt
+def add_expense(request):
+    if request.method == "POST":
+
+        Expense.objects.create(
+            title=request.POST.get("title"),
+            category=request.POST.get("category"),
+            amount=request.POST.get("amount"),
+            date=request.POST.get("date"),
+            description=request.POST.get("description", "")
+        )
+
+        return JsonResponse({"message": "Expense added successfully"})
+    
+
+
+@csrf_exempt
+def view_expenses(request):
+
+        expenses = list(Expense.objects.all().values())
+        return JsonResponse({"expenses": expenses})
+
+@csrf_exempt
+def get_blocked_members(request):
+    if request.method == "GET":
+
+        blocked_members = list(Member.objects.filter(status="Blocked").values())
+
+        if not blocked_members:
+            return JsonResponse({"message": "No blocked members found"})
+
+        return JsonResponse(blocked_members, safe=False)
