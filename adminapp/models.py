@@ -1,4 +1,5 @@
 from django.db import models
+from cloudinary.models import CloudinaryField
 
 
 class Member(models.Model):
@@ -6,31 +7,36 @@ class Member(models.Model):
     name = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20)
     email = models.EmailField(blank=True, null=True)
-    plan = models.CharField(max_length=100, blank=True, null=True)
-    duration = models.CharField(max_length=100, blank=True, null=True)
+    plan = models.CharField(max_length=100, null=True, blank=True)
     join_date = models.CharField(max_length=50, blank=True, null=True)
     status = models.CharField(max_length=50, blank=True, null=True)
+
     photo = models.CharField(max_length=500, blank=True, null=True)
+
     height = models.FloatField(blank=True, null=True)
     weight = models.FloatField(blank=True, null=True)
     bmi = models.FloatField(blank=True, null=True)
+
     age = models.IntegerField(blank=True, null=True)
     blood_group = models.CharField(max_length=20, blank=True, null=True)
+
     location = models.CharField(max_length=255, blank=True, null=True)
     adhaar_number = models.CharField(max_length=50, blank=True, null=True)
-    paid_amount = models.FloatField(blank=True, null=True)
-    due_amount = models.FloatField(blank=True, null=True)
-    expiry_date = models.DateField(blank=True,null=True)
-    gender = models.CharField(max_length=20, blank=True, null=True)
-    pause_start_date = models.DateField(blank=True,null=True)
 
+    paid_amount = models.FloatField(default=0)
+    due_amount = models.FloatField(default=0)
+
+    expiry_date = models.DateField(blank=True, null=True)
+
+    gender = models.CharField(max_length=20, blank=True, null=True)
+
+    pause_start_date = models.DateField(blank=True, null=True)
 
 
 class Plan(models.Model):
     name = models.CharField(max_length=100)
     duration = models.CharField(max_length=100)
     price = models.FloatField()
-
 
 class Trainer(models.Model):
     name = models.CharField(max_length=255)
@@ -50,26 +56,12 @@ class Branch(models.Model):
     capacity = models.IntegerField(blank=True, null=True)
 
 
-
-# class Payment(models.Model):
-#     member = models.ForeignKey(
-#         Member,
-#         on_delete=models.CASCADE,
-#         db_column='member_id'
-#     )
-#     amount = models.FloatField()
-#     payment_date = models.CharField(max_length=50)
-#     payment_method = models.CharField(max_length=100, blank=True, null=True)
-#     type = models.CharField(max_length=100, blank=True, null=True)
-
-
 class Payment(models.Model):
     member = models.ForeignKey(Member, on_delete=models.CASCADE, db_column='member_id')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     payment_date = models.DateField()
     payment_method = models.CharField(max_length=100, blank=True, null=True)
     payment_type = models.CharField(max_length=100, blank=True, null=True)
-
 
 
 class Expense(models.Model):
@@ -109,3 +101,12 @@ class TrainerPayment(models.Model):
 # class Setting(models.Model):
 #     key = models.CharField(max_length=255, primary_key=True)
 #     value = models.TextField()
+
+class Product(models.Model):
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    stock = models.IntegerField(default=0)
+    category = models.CharField(max_length=100) 
+    image = CloudinaryField("image")
+    created_at = models.DateTimeField(auto_now_add=True)

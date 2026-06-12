@@ -1,22 +1,52 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Expense, Payment, Trainer, TrainerPayment, Member,Expense
+from .models import Branch, Expense, Payment, Product, Trainer, TrainerPayment, Member,Expense
 import json
 from datetime import datetime
 
 
 #.......................... MEMBERS
 
+
 @csrf_exempt
 def create_member(request):
-    if request.method == "POST":
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
 
-        last_member = Member.objects.order_by('-id').first()
+    try:
+        # Member ID
+        last_member = Member.objects.order_by("-id").first()
+        next_id = f"{int(last_member.id) + 1:04d}" if last_member else "0001"
 
-        if last_member:
-            next_id = f"{int(last_member.id) + 1:04d}"
-        else:
-            next_id = "0001"
+        # Plan name from React
+        plan_name = request.POST.get("plan")
+
+        if not plan_name:
+            return JsonResponse({"error": "Plan is required"}, status=400)
+
+        # Join date
+        join_date_str = request.POST.get("join_date")
+
+        if not join_date_str:
+            return JsonResponse({"error": "Join date is required"}, status=400)
+
+        join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
+
+        # Duration based on selected plan name
+        plan_days = {
+            "Monthly": 30,
+            "Quarterly": 90,
+            "Half Yearly": 180,
+            "Yearly": 365,
+            "Premium": 365,
+        }
+
+        days = plan_days.get(plan_name, 0)
+        expiry_date = join_date + timedelta(days=days)
+
+        paid_amount = float(request.POST.get("paid_amount") or 0)
+
+        photo = request.FILES.get("photo")
 
         member = Member.objects.create(
             id=next_id,
@@ -24,9 +54,8 @@ def create_member(request):
             phone=request.POST.get("phone"),
             email=request.POST.get("email"),
             plan=request.POST.get("plan"),
-            duration=request.POST.get("duration"),
-            join_date=request.POST.get("join_date"),
-            photo=request.POST.get("photo"),
+            join_date=join_date,
+            photo=photo,
             height=request.POST.get("height"),
             weight=request.POST.get("weight"),
             age=request.POST.get("age"),
@@ -34,17 +63,22 @@ def create_member(request):
             location=request.POST.get("location"),
             adhaar_number=request.POST.get("adhaar_number"),
             gender=request.POST.get("gender"),
-            paid_amount=request.POST.get("paid_amount"),
-            due_amount=request.POST.get("due_amount"),
-            expiry_date=request.POST.get("expiry_date"),
-            status="Active"
+            paid_amount=paid_amount,
+            due_amount=0,
+            expiry_date=expiry_date,
+            status="Active",
         )
 
         return JsonResponse({
             "id": member.id,
-            "status": member.status
+            "name": member.name,
+            "plan": member.plan,
+            "status": member.status,
+            "expiry_date": member.expiry_date,
         })
-    
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
 from datetime import date, timedelta
 
@@ -88,8 +122,7 @@ def update_member(request, member_id):
         member.name = request.POST.get("name")
         member.phone = request.POST.get("phone")
         member.email = request.POST.get("email")
-        member.plan = request.POST.get("plan")
-        member.duration = request.POST.get("duration")
+        member.plan = request.POST.get("plan")  # <-- plan name
         member.join_date = request.POST.get("join_date")
         member.height = request.POST.get("height")
         member.weight = request.POST.get("weight")
@@ -98,13 +131,8 @@ def update_member(request, member_id):
         member.location = request.POST.get("location")
         member.adhaar_number = request.POST.get("adhaar_number")
         member.gender = request.POST.get("gender")
-        member.paid_amount = request.POST.get("paid_amount")
-        member.due_amount = request.POST.get("due_amount")
-        # member.expiry_date = request.POST.get("expiry_date")
-
         if request.POST.get("status"):
             member.status = request.POST.get("status")
-
         if request.FILES.get("photo"):
             member.photo = request.FILES.get("photo")
 
@@ -294,7 +322,7 @@ def update_plan(request, plan_id):
         plan.name = request.POST.get("name")
         plan.duration = request.POST.get("duration")
         plan.price = request.POST.get("price")
-
+        
         plan.save()
 
         return JsonResponse({"message":"Updation success"})
@@ -353,7 +381,7 @@ def update_branch(request, branch_id):
         branch.capacity = request.POST.get("capacity")
         branch.save()
 
-    return JsonResponse({"message": "Branch updated successfully"})
+        return JsonResponse({"message": "Branch updated successfully"})
 
 
 
@@ -389,19 +417,23 @@ def get_dashboard_stats(request):
         expiries = Member.objects.filter(expiry_date__range=[today, next_week]).order_by('expiry_date')
 
         upcoming_expiries_list = [
-            {
-                "name": m.name,
-                "expiry_date": m.expiry_date
-            }
-            for m in expiries
-        ]
+                {
+                    "name": m.name,
+                    "phone": m.phone,
+                    "expiry_date": m.expiry_date,
+                    "due_amount": m.due_amount,
+                }
+                for m in expiries
+            ]
 
         recent = Member.objects.order_by('-id')[:5]
 
         recent_registrations = [
             {
                 "name": m.name,
+                
                 "plan": m.plan,
+                
                 # "photo": m.photo.url if m.photo else None,
                 "join_date": m.join_date
             }
@@ -546,21 +578,50 @@ def resume_member(request, member_id):
     
 
     
+from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
+from django.db.models import Sum
+from .models import Member, Payment
+
 @csrf_exempt
 def add_payment(request, member_id):
     if request.method == "POST":
 
+        member = Member.objects.get(id=member_id)
+
         Payment.objects.create(
-            member_id=member_id,
+            member=member,
             amount=request.POST.get("amount"),
             payment_date=request.POST.get("payment_date"),
             payment_method=request.POST.get("payment_method"),
-            payment_type=request.POST.get("type")
+            payment_type=request.POST.get("payment_type")
         )
 
-        return JsonResponse({"message": "Payment recorded successfully"})
+        total_paid = Payment.objects.filter(
+            member=member
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
 
-    return JsonResponse({"error": "Invalid request method"},status=405)
+        member.paid_amount = float(total_paid)
+
+        member.due_amount = max(
+            float(member.plan.price) - float(total_paid),
+            0
+        )
+
+        member.save()
+
+        return JsonResponse({
+            "message": "Payment recorded successfully",
+            "paid_amount": member.paid_amount,
+            "due_amount": member.due_amount
+        })
+
+    return JsonResponse(
+        {"error": "Invalid request method"},
+        status=405
+    )
     
 
 
@@ -570,8 +631,30 @@ def get_single_payment(request, member_id):
 
 
 def get_payments(request):
-    payments=Payment.objects.all().values()
-    return JsonResponse(list(payments),safe=False)
+    data = []
+
+    for payment in Payment.objects.select_related('member').all():
+        member = payment.member
+
+        total_paid = Payment.objects.filter(member=member).aggregate(
+            total=Sum('amount')
+        )['total'] or 0
+
+        plan_fee = member.plan if member.plan else 0
+        due_amount = plan_fee - total_paid
+        if due_amount < 0:
+            due_amount = 0
+
+        data.append({
+            "member_name": member.name,
+            # "phone": member.phone,
+            # "payment_id": payment.id,
+            "amount_paid": payment.amount,
+            "total_paid": total_paid,
+            "due_amount": due_amount,
+        })
+
+    return JsonResponse(data, safe=False)
 
 
 
@@ -627,10 +710,148 @@ def view_expenses(request):
 @csrf_exempt
 def get_blocked_members(request):
     if request.method == "GET":
-
-        blocked_members = list(Member.objects.filter(status="Blocked").values())
-
-        if not blocked_members:
-            return JsonResponse({"message": "No blocked members found"})
+        blocked_members = list(
+            Member.objects.filter(status="Blocked").values()
+        )
 
         return JsonResponse(blocked_members, safe=False)
+    
+
+@csrf_exempt
+def send_whatsapp(request, member_id):
+    member = Member.objects.get(id=member_id)
+
+    return JsonResponse({
+        "id": member.id,
+        "name": member.name,
+        "phone": member.phone,
+        "due_amount": member.due_amount,
+        "expiry_date": str(member.expiry_date)
+    })
+
+
+
+
+def expiring_soon_members(request):
+    today = date.today()
+    next_3_days = today + timedelta(days=3)
+
+    members = Member.objects.filter(
+        expiry_date__range=[today, next_3_days],
+        status="Active"
+    ).values(
+        "id",
+        "name",
+        "phone",
+        "expiry_date",
+        "due_amount"  
+    )
+
+    return JsonResponse(list(members), safe=False)
+
+import json
+
+@csrf_exempt
+def create_product(request):
+    if request.method == "POST":
+        data = json.loads(request.body)
+
+        product = Product.objects.create(
+            name=data.get("name"),
+            description=data.get("description"),
+            price=data.get("price"),
+            stock=data.get("stock"),
+            category=data.get("category"),
+        )
+
+        return JsonResponse({"message": "Product created"})
+
+# READ
+def get_products(request):
+    products = Product.objects.all()
+    data = []
+    for product in products:
+        data.append({
+            "id": product.id,
+            "name": product.name,
+            "description": product.description,
+            "price": product.price,
+            "stock": product.stock,
+            "category": product.category,
+            # "image": product.image.url if product.image else None,
+        })
+
+    return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+def get_single_product(request, product_id):
+    if request.method == "GET":
+        try:
+            product = Product.objects.get(id=product_id)
+
+            data = {
+                "id": product.id,
+                "name": product.name,
+                "description": product.description,
+                "price": product.price,
+                "stock": product.stock,
+                "category": product.category,
+                # "image": product.image.url if product.image else None,
+            }
+
+            return JsonResponse(data, safe=False)
+
+        except Product.DoesNotExist:
+            return JsonResponse(
+                {"error": "Product not found"},
+                status=404
+            )
+
+    return JsonResponse(
+        {"error": "Invalid request method"},
+        status=400
+    )
+
+# UPDATE
+import json
+
+@csrf_exempt
+def update_product(request, product_id):
+    if request.method == "POST":
+        data = json.loads(request.body)
+
+        product = Product.objects.get(id=product_id)
+
+        product.name = data.get("name", product.name)
+        product.description = data.get("description", product.description)
+        product.price = data.get("price", product.price)
+        product.stock = data.get("stock", product.stock)
+        product.category = data.get("category", product.category)
+
+        product.save()
+
+        return JsonResponse({"message": "Updated"})
+# DELETE
+
+@csrf_exempt
+def delete_product(request, product_id):
+    if request.method != "DELETE":
+        return JsonResponse(
+            {"error": "Method not allowed"},
+            status=405
+        )
+    try:
+        product = Product.objects.get(id=product_id)
+    except Product.DoesNotExist:
+        return JsonResponse(
+            {"error": "Product not found"},
+            status=404
+        )
+
+    product.delete()
+
+    return JsonResponse(
+        {"message": "Deleted successfully"},
+        status=200
+    )

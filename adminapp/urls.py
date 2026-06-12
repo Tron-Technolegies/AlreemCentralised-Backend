@@ -1,4 +1,6 @@
 from django.urls import path
+from django.conf.urls.static import static
+from alreem import settings
 from . import views
 
 urlpatterns = [
@@ -43,7 +45,14 @@ urlpatterns = [
     path('blocked_members/', views.get_blocked_members, name='blocked_members'),
 
 
+    path('send_whatsapp/<str:member_id>/', views.send_whatsapp, name='send_whatsapp'),
+    path("expiring_soon_members/", views.expiring_soon_members, name='expiring_soon_members'),
 
-    # path('members/next-id/generate/', views.get_next_member_id, name='get_next_member_id'),
+    path("products/", views.get_products),
+    path("products/create/", views.create_product),
+    path("products/<int:product_id>/", views.get_single_product),
+    path("products/update/<int:product_id>/", views.update_product),
+    path("products/delete/<int:product_id>/", views.delete_product),
 
 ] 
+
