@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Expense, Payment, Product, Trainer, TrainerPayment, Member,Expense
+from .models import Branch, Expense, Payment, Product, Sales_product, Trainer, TrainerPayment, Member,Expense
 import json
 from datetime import datetime
 
@@ -855,3 +855,109 @@ def delete_product(request, product_id):
         {"message": "Deleted successfully"},
         status=200
     )
+
+
+@csrf_exempt
+def sell_product(request):
+    if request.method == "POST":
+
+        data = json.loads(request.body)
+
+        product_id = data.get("product_id")
+        quantity = int(data.get("quantity", 0))
+        try:
+             member = Member.objects.get(id=data.get("member_id"))
+        except Member.DoesNotExist:
+            return JsonResponse({
+                     "success": False,
+                     "message": "Member not found"
+                              })
+
+        if quantity <= 0:
+            return JsonResponse({
+                "success": False,
+                "message": "Invalid quantity"
+            })
+
+        try:
+            product = Product.objects.get(id=product_id)
+
+            if quantity > product.stock:
+                return JsonResponse({
+                    "success": False,
+                    "message": "Insufficient stock"
+                })
+
+            unit_price = product.price
+            total_amount = product.price * quantity
+
+            Sales_product.objects.create(
+                member=member,
+                product=product,
+                quantity=quantity,
+                unit_price=product.price,
+                total_amount=product.price * quantity
+            )
+
+            product.stock -= quantity
+            product.save()
+
+            return JsonResponse({
+                "success": True,
+                "message": "Sale completed"
+            })
+
+        except Product.DoesNotExist:
+            return JsonResponse({
+                "success": False,
+                "message": "Product not found"
+            })
+        
+
+@csrf_exempt      
+def sales_list(request):
+    sales = Sales_product.objects.select_related("product").all().order_by("-sold_at")
+
+    data = []
+
+    for sale in sales:
+        data.append({
+            "id": sale.id,
+            "member_id": sale.member.id if sale.member else None,
+            "member_name": sale.member.name if sale.member else None,
+            "product": sale.product.name,
+            "quantity": sale.quantity,
+            "unit_price": float(sale.unit_price),
+            "total_amount": float(sale.total_amount),
+            "sold_at": sale.sold_at.strftime("%d-%m-%Y %H:%M")
+        })
+    return JsonResponse({
+        "success": True,
+        "sales": data
+    })
+
+
+# from django.db.models import Sum
+# from django.utils import timezone
+
+# def today_sales(request):
+#     today = timezone.now().date()
+
+#     sales = Sales_product.objects.filter(
+#         sold_at__date=today
+#     )
+
+#     total_sales = sales.aggregate(
+#         total=Sum("total_amount")
+#     )["total"] or 0
+
+#     total_products_sold = sales.aggregate(
+#         total=Sum("quantity")
+#     )["total"] or 0
+
+#     return JsonResponse({
+#         "success": True,
+#         "today_sales": float(total_sales),
+#         "products_sold": total_products_sold,
+#         "sales_count": sales.count()
+#     })

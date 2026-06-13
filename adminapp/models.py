@@ -35,7 +35,7 @@ class Member(models.Model):
 
 class Plan(models.Model):
     name = models.CharField(max_length=100)
-    duration = models.CharField(max_length=100)
+    duration = models.IntegerField()
     price = models.FloatField()
 
 class Trainer(models.Model):
@@ -110,3 +110,32 @@ class Product(models.Model):
     category = models.CharField(max_length=100) 
     image = CloudinaryField("image")
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class Sales_product(models.Model):
+    member = models.ForeignKey(Member,on_delete=models.SET_NULL,null=True,blank=True)
+    product = models.ForeignKey(Product, on_delete=models.CASCADE)
+    quantity = models.PositiveIntegerField()
+    unit_price = models.DecimalField(max_digits=10,decimal_places=2)
+    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
+    sold_at = models.DateTimeField(auto_now_add=True)
+
+
+# class SaleItem(models.Model):
+#     sale = models.ForeignKey(
+#         Sales,
+#         on_delete=models.CASCADE,
+#         related_name="items"
+#     )
+
+#     product = models.ForeignKey(
+#         Product,
+#         on_delete=models.CASCADE
+#     )
+
+#     quantity = models.PositiveIntegerField()
+
+#     price = models.DecimalField(
+#         max_digits=10,
+#         decimal_places=2
+#     )

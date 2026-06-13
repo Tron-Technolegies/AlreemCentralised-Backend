@@ -48,11 +48,21 @@ urlpatterns = [
     path('send_whatsapp/<str:member_id>/', views.send_whatsapp, name='send_whatsapp'),
     path("expiring_soon_members/", views.expiring_soon_members, name='expiring_soon_members'),
 
-    path("products/", views.get_products),
-    path("products/create/", views.create_product),
-    path("products/<int:product_id>/", views.get_single_product),
-    path("products/update/<int:product_id>/", views.update_product),
-    path("products/delete/<int:product_id>/", views.delete_product),
+    path("products/", views.get_products,name="get_products"),
+    path("products/create/", views.create_product,name="create_product"),
+    path("products/<int:product_id>/", views.get_single_product,name="get_single_product"),
+    path("products/update/<int:product_id>/", views.update_product,name="update_product"),
+    path("products/delete/<int:product_id>/", views.delete_product,name="delete_product"),
+
+
+    path("sell_product/", views.sell_product,name="sell_product"),
+    path("sales_list/", views.sales_list,name="sales_list"),
+    # path("today_sales/", views.today_sales,name="today_sales"),
+    # path("products/<int:product_id>/buy/", views.buy_product),
+
+    
+
+
 
 ] 
 
