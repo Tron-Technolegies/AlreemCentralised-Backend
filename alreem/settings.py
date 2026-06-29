@@ -15,8 +15,6 @@ from dotenv import load_dotenv
 import os
 load_dotenv()
 import cloudinary
-import cloudinary.uploader
-import cloudinary.api
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -39,27 +37,21 @@ ALLOWED_HOSTS = []
 
 INSTALLED_APPS = [
     "corsheaders",
-    "cloudinary",
-    "cloudinary_storage",
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'adminapp'
+    'adminapp',
+    "cloudinary",
+    "cloudinary_storage",
 ]
+
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
-CLOUDINARY_STORAGE = {
-    "CLOUD_NAME": "du5by6aew",
-    "API_KEY": "913881241335499",
-    "API_SECRET": "acJ-bgY49i6q329mhiIWTHyRxXo",
-}
-
-DEFAULT_FILE_STORAGE = "cloudinary_storage.storage.MediaCloudinaryStorage"
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -107,6 +99,14 @@ DATABASES = {
         'PASSWORD':os.getenv('PASSWORD'),
     }
 }
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True,
+)
+
 
 
 # Password validation

@@ -10,7 +10,7 @@ class Member(models.Model):
     plan = models.CharField(max_length=100, null=True, blank=True)
     join_date = models.CharField(max_length=50, blank=True, null=True)
     status = models.CharField(max_length=50, blank=True, null=True)
-    photo = models.URLField(blank=True, null=True)  # store Cloudinary URL
+    photo = CloudinaryField("image",blank=True, null=True)
     height = models.FloatField(blank=True, null=True)
     weight = models.FloatField(blank=True, null=True)
     bmi = models.FloatField(blank=True, null=True, editable=False)
@@ -104,12 +104,35 @@ class Branch(models.Model):
 
 
 class Payment(models.Model):
-    member = models.ForeignKey(Member, on_delete=models.CASCADE, db_column='member_id')
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    payment_date = models.DateField()
-    payment_method = models.CharField(max_length=100, blank=True, null=True)
-    payment_type = models.CharField(max_length=100, blank=True, null=True)
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
 
+    staff = models.ForeignKey(
+        Staffs,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True
+    )
+
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+
+    payment_date = models.DateField()
+
+    payment_method = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    payment_type = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
 
 class Expense(models.Model):
 
@@ -155,7 +178,7 @@ class Product(models.Model):
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.IntegerField(default=0)
     category = models.CharField(max_length=100) 
-    image = CloudinaryField("image")
+    image = CloudinaryField("image",blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # payment_method = models.CharField(max_length=20, default="cash")
 
@@ -168,6 +191,16 @@ class Sales_product(models.Model):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     sold_at = models.DateTimeField(auto_now_add=True)
     payment_method = models.CharField(max_length=20, default="cash")
+
+
+class Enquiry(models.Model):
+    name = models.CharField(max_length=255, null=True, blank=True)
+    phone = models.CharField(max_length=20)
+    plan=models.CharField(max_length=100, null=True, blank=True)
+    date = models.CharField(max_length=50, blank=True, null=True)
+
+    
+
 
 
 

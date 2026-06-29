@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Expense, Payment, Product, Sales_product, Trainer, TrainerPayment, Member,Expense
+from .models import Branch, Enquiry, Expense, Payment, Product, Sales_product, Member,Expense
 import json
 from datetime import datetime
 from django.utils import timezone
@@ -77,7 +77,7 @@ def create_member(request):
 
         plan_amount = plan_prices.get(plan_name, 0)
         due_amount = max(plan_amount - paid_amount, 0)
-
+        photo = request.FILES.get("photo")
         member = Member.objects.create(
             id=next_id,
             name=request.POST.get("name"),
@@ -85,7 +85,7 @@ def create_member(request):
             email=request.POST.get("email"),
             plan=plan_name,
             join_date=join_date,
-            # photo=photo,
+            photo=photo, 
             height=height,
             weight=weight,
             bmi=bmi,
@@ -98,6 +98,7 @@ def create_member(request):
             due_amount=due_amount,
             expiry_date=expiry_date,
             status="Active",
+
         )
         return JsonResponse({
             "id": member.id,
@@ -115,6 +116,10 @@ def create_member(request):
 
 from datetime import date, timedelta
 
+from datetime import date, timedelta
+from django.http import JsonResponse
+
+
 @csrf_exempt
 def get_members(request):
     if request.method == "GET":
@@ -122,53 +127,70 @@ def get_members(request):
         today = date.today()
 
         # Block members 7 days after expiry
-        Member.objects.filter(expiry_date__lt=today - timedelta(days=7),status="Active").update(status="Blocked")
+        Member.objects.filter(
+            expiry_date__lt=today - timedelta(days=7),
+            status="Active"
+        ).update(status="Blocked")
 
-        members = list(Member.objects.order_by('id').values())
+        data = []
 
-        return JsonResponse(members, safe=False)
+        for member in Member.objects.order_by("id"):
+            data.append({
+                "id": member.id,
+                "name": member.name,
+                "phone": member.phone,
+                "email": member.email,
+                "age": member.age,
+                "gender": member.gender,
+                "blood_group": member.blood_group,
+                "location": member.location,
+                "height": member.height,
+                "weight": member.weight,
+                "bmi": member.bmi,
+                "plan": member.plan,
+                "join_date": member.join_date,
+                "expiry_date": member.expiry_date,
+                "paid_amount": member.paid_amount,
+                "due_amount": member.due_amount,
+                "status": member.status,
+                "photo": member.photo.url if member.photo else None,
+            })
+
+        return JsonResponse(data, safe=False)
     
 
 @csrf_exempt
 def get_member(request, member_id):
     if request.method == "GET":
         try:
-            member = Member.objects.values().get(id=member_id)
-            return JsonResponse(member)
+            member = Member.objects.get(id=member_id)
+
+            data = {
+                "id": member.id,
+                "name": member.name,
+                "phone": member.phone,
+                "email": member.email,
+                "age": member.age,
+                "gender": member.gender,
+                "blood_group": member.blood_group,
+                "location": member.location,
+                "height": member.height,
+                "weight": member.weight,
+                "bmi": member.bmi,
+                "plan": member.plan,
+                "join_date": member.join_date,
+                "expiry_date": member.expiry_date,
+                "paid_amount": member.paid_amount,
+                "due_amount": member.due_amount,
+                "status": member.status,
+                "adhaar_number": member.adhaar_number,
+                "photo": member.photo.url if member.photo else None,
+            }
+
+            return JsonResponse(data)
+
         except Member.DoesNotExist:
-            return JsonResponse({"error": "Member not found"},status=404)
-
-
-# @csrf_exempt
-# def update_member(request, member_id):
-#     if request.method == "POST":
-#         try:
-#             member = Member.objects.get(id=member_id)
-#         except Member.DoesNotExist:
-#             return JsonResponse({"error": "Member not found"}, status=404)
-
-#         member.name = request.POST.get("name")
-#         member.phone = request.POST.get("phone")
-#         member.email = request.POST.get("email")
-#         member.plan = request.POST.get("plan")  # <-- plan name
-#         member.join_date = request.POST.get("join_date")
-#         member.height = request.POST.get("height")
-#         member.weight = request.POST.get("weight")
-#         member.age = request.POST.get("age")
-#         member.blood_group = request.POST.get("blood_group")
-#         member.location = request.POST.get("location")
-#         member.adhaar_number = request.POST.get("adhaar_number")
-#         member.gender = request.POST.get("gender")
-#         if request.POST.get("status"):
-#             member.status = request.POST.get("status")
-#         if request.FILES.get("photo"):
-#             member.photo = request.FILES.get("photo")
-
-#         member.save()
-
-#         return JsonResponse({"message": "Member updated successfully"})
-
-#     return JsonResponse({"error": "Invalid request method"},status=405)
+            return JsonResponse({"error": "Member not found"}, status=404)
 
 
 from datetime import datetime, timedelta
@@ -270,129 +292,6 @@ def delete_member(request, member_id):
 
         except Member.DoesNotExist:
             return JsonResponse({"error": "Member not found"},status=404)
-
-
-# ..............................TRAINER 
-
-# @csrf_exempt
-# def create_trainer(request):
-#     if request.method == "POST":
-
-#         trainer = Trainer.objects.create(
-#             name=request.POST.get("name"),
-#             specialization=request.POST.get("specialization"),
-#             phone=request.POST.get("phone"),
-#             experience=request.POST.get("experience"),
-#             salary=request.POST.get("salary"),
-#             join_date=request.POST.get("join_date"),
-#             photo=request.FILES.get("photo")  
-#         )
-
-#         return JsonResponse({
-#             "id": trainer.id,
-#             "message": "Trainer created"
-#         })
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-# @csrf_exempt
-# def get_trainers(request):
-#     if request.method == "GET":
-#         trainers = list(Trainer.objects.order_by('id').values())
-#         return JsonResponse(trainers, safe=False)
-
-# @csrf_exempt
-# def get_single_trainer(request, trainer_id):
-#     if request.method == "GET":
-#         try:
-#             trainer = Trainer.objects.values().get(id=trainer_id)
-#             return JsonResponse(trainer, safe=False)
-#         except Trainer.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-
-# @csrf_exempt
-# def update_trainer(request, trainer_id):
-#     if request.method == "POST":
-
-#         try:
-#             trainer = Trainer.objects.get(id=trainer_id)
-
-#             trainer.name = request.POST.get("name")
-#             trainer.specialization = request.POST.get("specialization")
-#             trainer.phone = request.POST.get("phone")
-#             trainer.experience = request.POST.get("experience")
-#             trainer.salary = request.POST.get("salary")
-#             trainer.join_date = request.POST.get("join_date")
-
-          
-#             if request.FILES.get("photo"):
-#                 trainer.photo = request.FILES.get("photo")
-
-#             trainer.save()
-
-#             return JsonResponse({"message": "Trainer updated"})
-
-#         except Trainer.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-
-# @csrf_exempt
-# def delete_trainer(request, trainer_id):
-#     if request.method == "DELETE":
-#         try:
-#             trainer = Trainer.objects.get(id=trainer_id)
-#             trainer.delete()
-
-#             return JsonResponse({"message": "Trainer deleted"})
-
-#         except Trainer.DoesNotExist:
-
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-
-# @csrf_exempt
-# def get_trainer_payments(request):
-#     if request.method == "GET":
-#         payments = TrainerPayment.objects.all().values()
-#         return JsonResponse(list(payments), safe=False)
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-# @csrf_exempt
-# def get_single_trainer_payment(request,trainer_id):
-#     if request.method == "GET":
-#         try:
-#             trainer=TrainerPayment.objects.values().get(id=trainer_id)
-#             return JsonResponse(trainer,safe=False)
-#         except TrainerPayment.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-
-
-# @csrf_exempt
-# def add_trainer_payment(request, trainer_id):
-#     if request.method == "POST":
-
-#         TrainerPayment.objects.create(
-#             trainer_id=trainer_id,
-#             amount=request.POST.get("amount"),
-#             payment_date=request.POST.get("payment_date"),
-#             type=request.POST.get("type", "Salary"),
-#             notes=request.POST.get("notes"),
-#             for_month=request.POST.get("for_month")
-#         )
-
-#         return JsonResponse({
-#             "message": "Trainer payment recorded"
-#         })
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
 
 
 from .models import Plan
@@ -559,7 +458,7 @@ def get_dashboard_stats(request):
             for m in recent
         ]
 
-        trainers_count = Trainer.objects.count()
+        # trainers_count = Trainer.objects.count()
         
 
 # Membership income
@@ -627,7 +526,7 @@ def get_dashboard_stats(request):
             "blocked_members": blocked_members,
             "active_members_growth": "+5.2%",
 
-            "trainers_count": trainers_count,
+            # "trainers_count": trainers_count,
             "trainers_growth": "+2",
 
             "total_income": total_income,
@@ -719,52 +618,55 @@ def get_dashboard_stats(request):
 #         })
     
 
-    
-from django.views.decorators.csrf import csrf_exempt
-from django.http import JsonResponse
 from django.db.models import Sum
-from .models import Member, Payment
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from django.shortcuts import get_object_or_404
 
 @csrf_exempt
+@require_http_methods(["POST"])
 def add_payment(request, member_id):
-    if request.method == "POST":
 
-        member = Member.objects.get(id=member_id)
+    member = get_object_or_404(Member, id=member_id)
 
-        Payment.objects.create(
-            member=member,
-            amount=request.POST.get("amount"),
-            payment_date=request.POST.get("payment_date"),
-            payment_method=request.POST.get("payment_method"),
-            payment_type=request.POST.get("payment_type")
+    amount = request.POST.get("amount")
+
+    if not amount:
+        return JsonResponse(
+            {"error": "Amount is required"},
+            status=400
         )
 
-        total_paid = Payment.objects.filter(
-            member=member
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-        member.paid_amount = float(total_paid)
-
-        member.due_amount = max(
-            float(member.plan.price) - float(total_paid),
-            0
-        )
-
-        member.save()
-
-        return JsonResponse({
-            "message": "Payment recorded successfully",
-            "paid_amount": member.paid_amount,
-            "due_amount": member.due_amount
-        })
-
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=405
+    Payment.objects.create(
+        member=member,
+        amount=amount,
+        payment_date=request.POST.get("payment_date"),
+        payment_method=request.POST.get("payment_method"),
+        payment_type=request.POST.get("payment_type")
     )
-    
+
+    total_paid = (
+        Payment.objects.filter(member=member)
+        .aggregate(total=Sum("amount"))["total"] or 0
+    )
+
+    # Get plan object using the plan name stored in member.plan
+    plan = get_object_or_404(Plan, name=member.plan)
+
+    member.paid_amount = total_paid
+    member.due_amount = max(
+        float(plan.price) - float(total_paid),
+        0
+    )
+
+    member.save()
+
+    return JsonResponse({
+        "message": "Payment recorded successfully",
+        "paid_amount": member.paid_amount,
+        "due_amount": member.due_amount
+    })
 
 
 def get_single_payment(request, member_id):
@@ -923,26 +825,39 @@ def expiring_soon_members(request):
     return JsonResponse(data, safe=False)
 
 import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import Product
+
 
 @csrf_exempt
 def create_product(request):
     if request.method == "POST":
-        data = json.loads(request.body)
-
         product = Product.objects.create(
-            name=data.get("name"),
-            description=data.get("description"),
-            price=data.get("price"),
-            stock=data.get("stock"),
-            category=data.get("category"),
+            name=request.POST.get("name"),
+            description=request.POST.get("description"),
+            price=request.POST.get("price"),
+            stock=request.POST.get("stock"),
+            category=request.POST.get("category"),
+            image=request.FILES.get("image"),
         )
 
-        return JsonResponse({"message": "Product created"})
+        return JsonResponse(
+            {
+                "message": "Product created",
+                "id": product.id,
+            },
+            status=201,
+        )
+
+    return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
 
 # READ
 def get_products(request):
     products = Product.objects.all()
     data = []
+
     for product in products:
         data.append({
             "id": product.id,
@@ -951,11 +866,10 @@ def get_products(request):
             "price": product.price,
             "stock": product.stock,
             "category": product.category,
-            # "image": product.image.url if product.image else None,
+            "image": product.image.url if product.image else None,
         })
 
     return JsonResponse(data, safe=False)
-
 
 @csrf_exempt
 def get_single_product(request, product_id):
@@ -987,24 +901,33 @@ def get_single_product(request, product_id):
     )
 
 # UPDATE
-import json
 
 @csrf_exempt
 def update_product(request, product_id):
     if request.method == "POST":
-        data = json.loads(request.body)
+        try:
+            product = Product.objects.get(id=product_id)
 
-        product = Product.objects.get(id=product_id)
+            product.name = request.POST.get("name", product.name)
+            product.description = request.POST.get("description", product.description)
+            product.price = request.POST.get("price", product.price)
+            product.stock = request.POST.get("stock", product.stock)
+            product.category = request.POST.get("category", product.category)
 
-        product.name = data.get("name", product.name)
-        product.description = data.get("description", product.description)
-        product.price = data.get("price", product.price)
-        product.stock = data.get("stock", product.stock)
-        product.category = data.get("category", product.category)
+            # Update image only if a new one is uploaded
+            if request.FILES.get("image"):
+                product.image = request.FILES.get("image")
 
-        product.save()
+            product.save()
 
-        return JsonResponse({"message": "Updated"})
+            return JsonResponse({"message": "Updated"}, status=200)
+
+        except Product.DoesNotExist:
+            return JsonResponse({"error": "Product not found"}, status=404)
+
+    return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+
 # DELETE
 
 @csrf_exempt
@@ -1352,3 +1275,355 @@ def resume_member(request, member_id):
         "status": member.status,
         "is_paused": member.is_paused
     })
+
+
+
+# ..............................TRAINER 
+
+# @csrf_exempt
+# def create_trainer(request):
+#     if request.method == "POST":
+
+#         trainer = Trainer.objects.create(
+#             name=request.POST.get("name"),
+#             specialization=request.POST.get("specialization"),
+#             phone=request.POST.get("phone"),
+#             experience=request.POST.get("experience"),
+#             salary=request.POST.get("salary"),
+#             join_date=request.POST.get("join_date"),
+#             photo=request.FILES.get("photo")  
+#         )
+
+#         return JsonResponse({
+#             "id": trainer.id,
+#             "message": "Trainer created"
+#         })
+
+#     return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+# @csrf_exempt
+# def get_trainers(request):
+#     if request.method == "GET":
+#         trainers = list(Trainer.objects.order_by('id').values())
+#         return JsonResponse(trainers, safe=False)
+
+# @csrf_exempt
+# def get_single_trainer(request, trainer_id):
+#     if request.method == "GET":
+#         try:
+#             trainer = Trainer.objects.values().get(id=trainer_id)
+#             return JsonResponse(trainer, safe=False)
+#         except Trainer.DoesNotExist:
+#             return JsonResponse({"error": "Trainer not found"},status=404)
+
+
+# @csrf_exempt
+# def update_trainer(request, trainer_id):
+#     if request.method == "POST":
+
+#         try:
+#             trainer = Trainer.objects.get(id=trainer_id)
+
+#             trainer.name = request.POST.get("name")
+#             trainer.specialization = request.POST.get("specialization")
+#             trainer.phone = request.POST.get("phone")
+#             trainer.experience = request.POST.get("experience")
+#             trainer.salary = request.POST.get("salary")
+#             trainer.join_date = request.POST.get("join_date")
+
+          
+#             if request.FILES.get("photo"):
+#                 trainer.photo = request.FILES.get("photo")
+
+#             trainer.save()
+
+#             return JsonResponse({"message": "Trainer updated"})
+
+#         except Trainer.DoesNotExist:
+#             return JsonResponse({"error": "Trainer not found"},status=404)
+
+#     return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+
+# @csrf_exempt
+# def delete_trainer(request, trainer_id):
+#     if request.method == "DELETE":
+#         try:
+#             trainer = Trainer.objects.get(id=trainer_id)
+#             trainer.delete()
+
+#             return JsonResponse({"message": "Trainer deleted"})
+
+#         except Trainer.DoesNotExist:
+
+#             return JsonResponse({"error": "Trainer not found"},status=404)
+
+
+
+
+# @csrf_exempt
+# def get_single_trainer_payment(request,trainer_id):
+#     if request.method == "GET":
+#         try:
+#             trainer=TrainerPayment.objects.values().get(id=trainer_id)
+#             return JsonResponse(trainer,safe=False)
+#         except TrainerPayment.DoesNotExist:
+#             return JsonResponse({"error": "Trainer not found"},status=404)
+
+# class Payment(models.Model):
+#     member = models.ForeignKey(Member, on_delete=models.CASCADE, db_column='member_id')
+#     amount = models.DecimalField(max_digits=10, decimal_places=2)
+#     payment_date = models.DateField()
+#     payment_method = models.CharField(max_length=100, blank=True, null=True)
+#     payment_type = models.CharField(max_length=100, blank=True, null=True)
+
+import json
+from django.http import JsonResponse
+from .models import Member, Payment
+@csrf_exempt
+def add_member_payment(request, member_id):
+    if request.method == "POST":
+        data = json.loads(request.body)
+        print("member_id =", member_id)
+        member = Member.objects.get(id=member_id)
+
+        amount = float(data.get("amount", 0))
+
+        # Amount must be positive
+        if amount <= 0:
+            return JsonResponse(
+                {"error": "Amount must be greater than 0"},
+                status=400
+            )
+
+        # Already fully paid
+        if float(member.due_amount) <= 0:
+            return JsonResponse(
+                {"error": "Membership fee already fully paid"},
+                status=400
+            )
+
+        # Prevent overpayment
+        if amount > float(member.due_amount):
+            return JsonResponse(
+                {"error": f"Amount cannot exceed due amount ₹{member.due_amount}"},
+                status=400
+            )
+
+        Payment.objects.create(
+            member=member,
+            amount=amount,
+            payment_date=data.get("payment_date"),
+            payment_type=data.get("payment_type"),
+            payment_method=data.get("payment_method"),
+        )
+
+        member.paid_amount += amount
+        member.due_amount -= amount
+
+        if member.due_amount < 0:
+            member.due_amount = 0
+
+        member.save()
+
+        return JsonResponse({
+            "message": "Member payment recorded",
+            "paid_amount": member.paid_amount,
+            "due_amount": member.due_amount,
+            "payment_completed": member.due_amount == 0
+        })
+
+    return JsonResponse(
+        {"error": "Invalid request method"},
+        status=405
+    )
+
+
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import Staffs, Payment
+
+@csrf_exempt
+def add_staff_payment(request, staff_id):
+    if request.method == "POST":
+        data = json.loads(request.body)
+
+        try:
+            staff = Staffs.objects.get(id=staff_id)
+        except Staffs.DoesNotExist:
+            return JsonResponse(
+                {"error": "Staff not found"},
+                status=404
+            )
+
+        amount = float(data.get("amount", 0))
+
+        if amount <= 0:
+            return JsonResponse(
+                {"error": "Amount must be greater than 0"},
+                status=400
+            )
+
+        payment = Payment.objects.create(
+            staff=staff,
+            amount=amount,
+            payment_date=data.get("payment_date"),
+            payment_method=data.get("payment_method"),
+            payment_type="Salary",
+        )
+
+        return JsonResponse({
+            "message": "Staff payment recorded",
+            "payment_id": payment.id,
+            "staff_name": staff.name,
+            "amount": payment.amount
+        })
+
+    return JsonResponse(
+        {"error": "Invalid request method"},
+        status=405
+    )
+
+
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import Payment
+
+@csrf_exempt
+def transactions(request):
+
+    payments = Payment.objects.select_related(
+        "member",
+        "staff"
+    ).order_by("-payment_date", "-id")
+
+    data = []
+
+    for payment in payments:
+
+        if payment.member:
+            data.append({
+                "id": payment.id,
+                "transaction_for": "Member",
+                "person_id": payment.member.id,
+                "name": payment.member.name,
+                "phone": payment.member.phone,
+                "amount": payment.amount,
+                "payment_type": payment.payment_type,
+                "payment_method": payment.payment_method,
+                "payment_date": payment.payment_date,
+            })
+
+        elif payment.staff:
+            data.append({
+                "id": payment.id,
+                "transaction_for": "Staff",
+                "person_id": payment.staff.id,
+                "name": payment.staff.name,
+                "phone": payment.staff.phone,
+                "amount": payment.amount,
+                "payment_type": payment.payment_type,
+                "payment_method": payment.payment_method,
+                "payment_date": payment.payment_date,
+            })
+
+    return JsonResponse(data, safe=False)
+
+
+
+
+
+@csrf_exempt
+def add_enquiry(request):
+    if request.method == "POST":
+        name = request.POST.get("name")
+        phone = request.POST.get("phone")
+        plan = request.POST.get("plan")
+        date = request.POST.get("date")
+
+        if not (phone.isdigit() and len(phone) == 10 ):
+            return JsonResponse(
+                {"error": "Enter a valid 10-digit mobile number"},status=400)
+
+        enquiry = Enquiry.objects.create(
+            name=name,
+            phone=phone,
+            plan=plan,
+            date=date
+        )
+
+        return JsonResponse({
+            "message": "Enquiry added",
+            "name": enquiry.name,
+            "phone": enquiry.phone,
+            "plan": enquiry.plan,
+            "date":enquiry.date
+        })
+
+    return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+
+def view_enquiry(request):
+        enquiries = Enquiry.objects.all().order_by("-id")
+
+        data = [
+            {
+                "id": enquiry.id,
+                "name": enquiry.name,
+                "phone": enquiry.phone,
+                "plan": enquiry.plan,
+                "date":enquiry.date
+            }
+            for enquiry in enquiries
+        ]
+
+        return JsonResponse(data, safe=False)
+
+
+@csrf_exempt
+def delete_enquiry(request, enquiry_id):
+    if request.method == "DELETE":
+        enquiry = get_object_or_404(Enquiry, id=enquiry_id)
+        enquiry.delete()
+
+        return JsonResponse({
+            "message": "Enquiry deleted successfully"
+        })
+
+    return JsonResponse({"error": "Invalid request method"}, status=405)
+
+
+
+
+# from django.http import JsonResponse
+# from .models import Staffs, Payment
+
+# def get_staff_payments(request, staff_id):
+#     try:
+#         staff = Staffs.objects.get(id=staff_id)
+#     except Staffs.DoesNotExist:
+#         return JsonResponse(
+#             {"error": "Staff not found"},
+#             status=404
+#         )
+
+#     payments = Payment.objects.filter(
+#         staff=staff
+#     ).order_by("-payment_date")
+
+#     data = []
+
+#     for payment in payments:
+#         data.append({
+#             "id": payment.id,
+#             "amount": payment.amount,
+#             "payment_date": payment.payment_date,
+#             "payment_method": payment.payment_method,
+#             "payment_type": payment.payment_type,
+#         })
+
+#     return JsonResponse(data, safe=False)
