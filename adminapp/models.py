@@ -68,31 +68,6 @@ class Staffs(models.Model):
         default="Active"
     )
 
-# class Staffs(models.Model):
-#     ROLE_CHOICES = [
-#         ("Trainer", "Trainer"),
-#         ("Receptionist", "Receptionist"),
-#         ("Manager", "Manager"),
-#         ("Accountant", "Accountant"),
-#         ("Cleaner", "Cleaner"),
-#     ]
-
-#     STATUS_CHOICES = [
-#         ("Active", "Active"),
-#         ("Inactive", "Inactive"),
-#     ]
-#     name = models.CharField(max_length=100, blank=True, null=True)
-#     role = models.CharField(max_length=100, blank=True, null=True)
-#     specialization = models.CharField(max_length=255, blank=True, null=True)
-#     phone = models.CharField(max_length=15, blank=True, null=True)
-#     experience = models.CharField(max_length=50, blank=True, null=True)
-#     joining_date = models.DateField(blank=True, null=True)
-#     salary = models.DecimalField(max_digits=10, decimal_places=2, default=0)
-#     status = models.CharField(
-#         max_length=10,
-#         choices=STATUS_CHOICES,
-#         default="Active"
-#     )
 
 
 class Branch(models.Model):

@@ -457,11 +457,9 @@ def get_dashboard_stats(request):
             }
             for m in recent
         ]
-
-        # trainers_count = Trainer.objects.count()
         
 
-# Membership income
+        # Membership income
         membership_total_income = Payment.objects.aggregate(
             total=Sum("amount")
         )["total"] or 0
@@ -802,7 +800,7 @@ def expiring_soon_members(request):
     today = date.today()
 
     start_date = today - timedelta(days=5)   # 5 days before today
-    end_date = today + timedelta(days=5)     # 5 days after today
+    end_date = today + timedelta(days=5)       # 5 days after today
 
     members = Member.objects.filter(
         status="Active",
