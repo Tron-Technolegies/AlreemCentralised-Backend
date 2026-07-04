@@ -33,6 +33,7 @@ urlpatterns = [
     path('view_expenses/', views.view_expenses, name='view_expenses'),
     path('blocked_members/', views.get_blocked_members, name='blocked_members'),
     path("expiring_soon_members/", views.expiring_soon_members, name='expiring_soon_members'),
+    path("expired_members/", views.expired_members, name='expired_members'),
 
     path('send_whatsapp/<str:member_id>/', views.send_whatsapp, name='send_whatsapp'),
 

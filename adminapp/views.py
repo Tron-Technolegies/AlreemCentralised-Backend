@@ -112,29 +112,36 @@ def create_member(request):
 
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500) 
+    
 
-
-from datetime import date, timedelta
-
-from datetime import date, timedelta
-from django.http import JsonResponse
 
 
 @csrf_exempt
 def get_members(request):
     if request.method == "GET":
-
         today = date.today()
-
-        # Block members 7 days after expiry
-        Member.objects.filter(
-            expiry_date__lt=today - timedelta(days=7),
-            status="Active"
-        ).update(status="Blocked")
-
+        members = Member.objects.all()
         data = []
 
-        for member in Member.objects.order_by("id"):
+        for member in members:
+            # paused members stay paused
+            if member.is_paused:
+                member.status = "Paused"
+
+            # normal expiry logic
+            elif member.expiry_date:
+                if member.expiry_date < today:
+                    days_expired = (today - member.expiry_date).days
+
+                    if days_expired <= 7:
+                        member.status = "Expired"
+                    else:
+                        member.status = "Blocked"
+                else:
+                    member.status = "Active"
+
+            member.save()
+
             data.append({
                 "id": member.id,
                 "name": member.name,
@@ -150,14 +157,26 @@ def get_members(request):
                 "plan": member.plan,
                 "join_date": member.join_date,
                 "expiry_date": member.expiry_date,
+                "pause_start_date": member.pause_start_date,
+                "is_paused": member.is_paused,
                 "paid_amount": member.paid_amount,
                 "due_amount": member.due_amount,
                 "status": member.status,
+                "adhaar_number": member.adhaar_number,
                 "photo": member.photo.url if member.photo else None,
             })
 
+        # Expired members first, ordered by expiry_date ascending
+        # Others after that, also by expiry_date ascending if available
+        data.sort(
+            key=lambda m: (
+                0 if m["status"] == "Expired" else 1,
+                m["expiry_date"] or date.max
+            )
+        )
+
         return JsonResponse(data, safe=False)
-    
+
 
 @csrf_exempt
 def get_member(request, member_id):
@@ -180,6 +199,8 @@ def get_member(request, member_id):
                 "plan": member.plan,
                 "join_date": member.join_date,
                 "expiry_date": member.expiry_date,
+                "pause_start_date": member.pause_start_date,
+                "is_paused": member.is_paused,
                 "paid_amount": member.paid_amount,
                 "due_amount": member.due_amount,
                 "status": member.status,
@@ -415,17 +436,29 @@ from django.db.models import Sum
 from datetime import date, timedelta
 
 
+def calculate_growth(current, previous):
+    if previous == 0:
+        return 100 if current > 0 else 0
+
+    return round(((current - previous) / previous) * 100, 2)
+
 @csrf_exempt
 def get_dashboard_stats(request):
     if request.method == "GET":
 
         today = date.today()
-        blocked_members = Member.objects.filter(
-        status="Blocked"
-        ).count()
+        if today.month == 1:
+            last_month = 12
+            last_year = today.year - 1
+        else:
+            last_month = today.month - 1
+            last_year = today.year
 
+        blocked_members = Member.objects.filter(status="Blocked").count()
         total_members = Member.objects.count()
         active_members = Member.objects.filter(status="Active").count()
+        expired_members = Member.objects.filter(status="Expired").count()
+        paused_members = Member.objects.filter(is_paused=True).count()
         pending_payments = Member.objects.filter(due_amount__gt=0).count()
         next_week = today + timedelta(days=7)
         # expiries = Member.objects.filter(expiry_date__range=[today, next_week]).order_by('expiry_date')
@@ -487,6 +520,21 @@ def get_dashboard_stats(request):
             sold_at__month=today.month
         ).aggregate(total=Sum("total_amount"))["total"] or 0
 
+        last_month_membership_income = Payment.objects.filter(
+            payment_date__year=last_year,
+            payment_date__month=last_month
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        last_month_product_income = Sales_product.objects.filter(
+            sold_at__year=last_year,
+            sold_at__month=last_month
+        ).aggregate(total=Sum("total_amount"))["total"] or 0
+
+        last_month_income = (
+            last_month_membership_income +
+            last_month_product_income
+        )
+
         # Combined income
         total_income = membership_total_income + product_total_income
         today_income = membership_today_income + product_today_income
@@ -507,6 +555,16 @@ def get_dashboard_stats(request):
             date__month=today.month
         ).aggregate(total=Sum("amount"))["total"] or 0
 
+        last_month_expense = Expense.objects.filter(
+            date__year=last_year,
+            date__month=last_month
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        last_month_profit = max(
+            last_month_income - last_month_expense,
+            0
+        )
+
 # .............................LOSS AND PROFIT
 
         today_profit = max(today_income - today_expense, 0)
@@ -517,15 +575,28 @@ def get_dashboard_stats(request):
         monthly_loss = max(monthly_expense - monthly_income, 0)
         net_profit = total_profit
 
+        revenue_growth = calculate_growth(
+            monthly_income,
+            last_month_income
+        )
+
+        expense_growth = calculate_growth(
+            monthly_expense,
+            last_month_expense
+        )
+
+        profit_growth = calculate_growth(
+            monthly_profit,
+            last_month_profit
+        )
+
 
         return JsonResponse({
             "total_members": total_members,
             "active_members": active_members,
             "blocked_members": blocked_members,
-            "active_members_growth": "+5.2%",
-
-            # "trainers_count": trainers_count,
-            "trainers_growth": "+2",
+            "expired_members": expired_members,
+            "paused_members": paused_members,
 
             "total_income": total_income,
             "today_income": today_income,
@@ -548,9 +619,9 @@ def get_dashboard_stats(request):
 
             "net_profit": net_profit,
 
-            "revenue_growth": "+12%",
-            "expense_growth": "+8%",
-            "profit_growth": "+15%",
+            "revenue_growth": revenue_growth,
+            "expense_growth": expense_growth,
+            "profit_growth": profit_growth,
 
             "pending_payments": pending_payments,
             "upcoming_expiries": len(upcoming_expiries_list),
@@ -776,11 +847,23 @@ def view_expenses(request):
 @csrf_exempt
 def get_blocked_members(request):
     if request.method == "GET":
-        blocked_members = list(
-            Member.objects.filter(status="Blocked").values()
-        )
+        members = Member.objects.filter(status="Blocked")
 
-        return JsonResponse(blocked_members, safe=False)
+        data = []
+
+        for member in members:
+            data.append({
+                "id": member.id,
+                "name": member.name,
+                "phone": member.phone,
+                "plan":member.plan,
+                "join_date":member.join_date,
+                "expiry_date":member.expiry_date,
+                "status": member.status,
+                "photo": member.photo.url if member.photo else None,
+            })
+
+        return JsonResponse(data, safe=False)
     
 
 @csrf_exempt
@@ -822,6 +905,32 @@ def expiring_soon_members(request):
 
     return JsonResponse(data, safe=False)
 
+
+
+@csrf_exempt
+def expired_members(request):
+    today = date.today()
+
+    members = Member.objects.filter(
+        expiry_date__lt=today
+    ).exclude(
+        status__in=["Paused", "Blocked"]
+    ).order_by("-expiry_date")
+
+    data = []
+    for member in members:
+        data.append({
+            "id": member.id,
+            "name": member.name,
+            "phone": member.phone,
+            # "plan": member.plan.name if member.plan else None,
+            "expiry_date": member.expiry_date,
+            "status": member.status,
+            "due_amount": member.due_amount,
+        })
+
+    return JsonResponse({"message": data}, safe=False)
+
 import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -853,7 +962,7 @@ def create_product(request):
 
 # READ
 def get_products(request):
-    products = Product.objects.all()
+    products = Product.objects.all().order_by("id")
     data = []
 
     for product in products:
@@ -1275,6 +1384,43 @@ def resume_member(request, member_id):
     })
 
 
+import json
+from datetime import datetime
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import Member
+
+@csrf_exempt
+def pause_member(request, member_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request"}, status=405)
+
+    try:
+        member = Member.objects.get(id=member_id)
+    except Member.DoesNotExist:
+        return JsonResponse({"error": "Member not found"}, status=404)
+
+    if member.is_paused:
+        return JsonResponse({"message": "Member is already paused"})
+
+    body = json.loads(request.body)
+
+    freeze_date = datetime.strptime(
+        body["freeze_date"],
+        "%Y-%m-%d"
+    ).date()
+
+    member.is_paused = True
+    member.pause_start_date = freeze_date
+    member.status = "Paused"
+    member.save()
+
+    return JsonResponse({
+        "message": "Member paused successfully",
+        "pause_start_date": member.pause_start_date.strftime("%Y-%m-%d"),
+        "status": member.status,
+        "is_paused": member.is_paused
+    })
 
 # ..............................TRAINER 
 
@@ -1370,12 +1516,7 @@ def resume_member(request, member_id):
 #         except TrainerPayment.DoesNotExist:
 #             return JsonResponse({"error": "Trainer not found"},status=404)
 
-# class Payment(models.Model):
-#     member = models.ForeignKey(Member, on_delete=models.CASCADE, db_column='member_id')
-#     amount = models.DecimalField(max_digits=10, decimal_places=2)
-#     payment_date = models.DateField()
-#     payment_method = models.CharField(max_length=100, blank=True, null=True)
-#     payment_type = models.CharField(max_length=100, blank=True, null=True)
+
 
 import json
 from django.http import JsonResponse
@@ -1442,66 +1583,68 @@ def add_member_payment(request, member_id):
 import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Staffs, Payment
+from .models import Staffs, Payment, Expense
+
 
 @csrf_exempt
 def add_staff_payment(request, staff_id):
-    if request.method == "POST":
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
+
+    try:
         data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON data"}, status=400)
 
-        try:
-            staff = Staffs.objects.get(id=staff_id)
-        except Staffs.DoesNotExist:
-            return JsonResponse(
-                {"error": "Staff not found"},
-                status=404
-            )
+    try:
+        staff = Staffs.objects.get(id=staff_id)
+    except Staffs.DoesNotExist:
+        return JsonResponse({"error": "Staff not found"}, status=404)
 
-        amount = float(data.get("amount", 0))
+    amount = float(data.get("amount", 0))
+    payment_date = data.get("payment_date")
+    payment_method = data.get("payment_method")
 
-        if amount <= 0:
-            return JsonResponse(
-                {"error": "Amount must be greater than 0"},
-                status=400
-            )
+    if amount <= 0:
+        return JsonResponse({"error": "Amount must be greater than 0"}, status=400)
 
-        payment = Payment.objects.create(
-            staff=staff,
-            amount=amount,
-            payment_date=data.get("payment_date"),
-            payment_method=data.get("payment_method"),
-            payment_type="Salary",
-        )
-
-        return JsonResponse({
-            "message": "Staff payment recorded",
-            "payment_id": payment.id,
-            "staff_name": staff.name,
-            "amount": payment.amount
-        })
-
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=405
+    # 1) Save in Payment table -> for Transactions page
+    payment = Payment.objects.create(
+        staff=staff,
+        amount=amount,
+        payment_type="Salary",
+        payment_method=payment_method,
+        payment_date=payment_date,
     )
 
+    # 2) Save in Expense table -> for expense/profit calculation
+    Expense.objects.create(
+        title=f"Salary - {staff.name}",
+        category="salary",
+        amount=amount,
+        date=payment_date,
+        description=f"Salary paid to {staff.name} via {payment_method}"
+    )
+
+    return JsonResponse({
+        "message": "Staff payment recorded successfully",
+        "payment_id": payment.id,
+        "staff_name": staff.name,
+        "amount": str(payment.amount)
+    }, status=201)
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from .models import Payment
 
+
 @csrf_exempt
 def transactions(request):
-
-    payments = Payment.objects.select_related(
-        "member",
-        "staff"
-    ).order_by("-payment_date", "-id")
+    payments = Payment.objects.select_related("member", "staff").order_by("-payment_date", "-id")
 
     data = []
 
     for payment in payments:
-
         if payment.member:
             data.append({
                 "id": payment.id,
@@ -1595,33 +1738,3 @@ def delete_enquiry(request, enquiry_id):
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
 
-
-
-# from django.http import JsonResponse
-# from .models import Staffs, Payment
-
-# def get_staff_payments(request, staff_id):
-#     try:
-#         staff = Staffs.objects.get(id=staff_id)
-#     except Staffs.DoesNotExist:
-#         return JsonResponse(
-#             {"error": "Staff not found"},
-#             status=404
-#         )
-
-#     payments = Payment.objects.filter(
-#         staff=staff
-#     ).order_by("-payment_date")
-
-#     data = []
-
-#     for payment in payments:
-#         data.append({
-#             "id": payment.id,
-#             "amount": payment.amount,
-#             "payment_date": payment.payment_date,
-#             "payment_method": payment.payment_method,
-#             "payment_type": payment.payment_type,
-#         })
-
-#     return JsonResponse(data, safe=False)
