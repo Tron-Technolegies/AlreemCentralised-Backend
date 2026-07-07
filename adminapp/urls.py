@@ -5,6 +5,11 @@ from . import views
 
 urlpatterns = [
 
+    path("admin_login/", views.admin_login, name="admin_login/"),
+    path("admin_profile_view/", views.admin_profile_view, name="admin_profile_view/"),
+    path("change_password/", views.change_password, name="change_password/"),
+
+
     path('members/', views.get_members, name='get_members'),
     path('members/create/', views.create_member, name='create_member'),
     path("members/get_payments/",views.get_payments,name="get_payments"),
@@ -56,7 +61,6 @@ urlpatterns = [
     path("staff/delete/<int:staff_id>/", views.delete_staff,name="delete_staff"),
     # path("today_sales/", views.today_sales,name="today_sales"),
 
-
     path("member/pause/<str:member_id>/",views.pause_member,name="pause_member"),
     path("member/resume/<str:member_id>/",views.resume_member,name="resume_member"),
 
@@ -67,6 +71,13 @@ urlpatterns = [
     path("add_enquiries/",views.add_enquiry,name="enquiry"),
     path("enquiries/",views.view_enquiry,name="enquiry"),
     path("enquiries/<int:enquiry_id>/delete/", views.delete_enquiry, name="delete_enquiry"),
+
+
+
+    
+
+
+
 
 ] 
 

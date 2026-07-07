@@ -4,9 +4,91 @@ from .models import Branch, Enquiry, Expense, Payment, Product, Sales_product, M
 import json
 from datetime import datetime
 from django.utils import timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import authenticate
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def admin_login(request):
+    username = request.data.get("username")
+    password = request.data.get("password")
+
+    if not username or not password:
+        return JsonResponse(
+            {"error": "Username and password are required"},status=404)
+
+    user = authenticate(username=username, password=password)
+
+    if user is None:
+        return JsonResponse(
+            {"error": "Invalid username or password"},status=401)
+
+    refresh = RefreshToken.for_user(user)
+
+    return JsonResponse(
+        {
+            "message": "Login successful",
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "is_staff": user.is_staff,
+                "is_superuser": user.is_superuser,
+            }},status=200)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    user = request.user
+    current_password = request.data.get("current_password")
+    new_password = request.data.get("new_password")
+    confirm_password = request.data.get("confirm_password")
+
+    if not current_password or not new_password or not confirm_password:
+        return JsonResponse({"error": "All fields are required"},status=400)
+
+    if not user.check_password(current_password):
+        return JsonResponse({"error": "Current password is incorrect"},status=400)
+
+    if new_password != confirm_password:
+        return JsonResponse({"error": "New password and confirm password do not match"},status=400)
+
+    if len(new_password) < 6:
+        return JsonResponse({"error": "New password must be at least 6 characters long"},status=400)
+
+    user.set_password(new_password)
+    user.save()
+
+    return JsonResponse({"message": "Password changed successfully"},status=200)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def admin_profile_view(request):
+    user = request.user
+
+    return JsonResponse(
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": f"{user.first_name} {user.last_name}".strip() or user.username,
+            "is_staff": user.is_staff,
+            "is_superuser": user.is_superuser,
+        }
+    )
+
 
 
 #.......................... MEMBERS
+
+
 
 @csrf_exempt
 def create_member(request):
@@ -19,36 +101,37 @@ def create_member(request):
         next_id = f"{int(last_member.id) + 1:04d}" if last_member else "0001"
 
         # Inputs
-        plan_name = request.POST.get("plan")
+        plan_id = request.POST.get("plan")
         join_date_str = request.POST.get("join_date")
+        phone = request.POST.get("phone", "").strip()
 
-        if not plan_name:
+        if not plan_id:
             return JsonResponse({"error": "Plan is required"}, status=400)
 
         if not join_date_str:
             return JsonResponse({"error": "Join date is required"}, status=400)
 
-        
-        # Parse date safely
-        join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
+        # Phone validation
+        if not (phone.isdigit() and len(phone) == 10):
+            return JsonResponse(
+                {"error": "Enter a valid 10-digit mobile number"},
+                status=400
+            )
 
-        # Plan mapping
-        plan_days = {
-            "Silver": 30,
-            "Gold": 60,
-            "Premium": 90,
-            "Platinum": 180,
-            "Diamond": 365,
-        }
-
-        days = plan_days.get(plan_name)
-
-        if not days:
+        # Get selected plan from DB
+        try:
+            plan = Plan.objects.get(id=plan_id)
+        except Plan.DoesNotExist:
             return JsonResponse({"error": "Invalid plan selected"}, status=400)
 
-        expiry_date = join_date + timedelta(days=days)
+        # Parse join date
+        join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
 
-        # ===== SAFE BMI CALCULATION =====
+        # Expiry from plan duration
+        duration = int(plan.duration or 0)
+        expiry_date = join_date + timedelta(days=duration)
+
+        # BMI calculation
         try:
             weight = float(request.POST.get("weight") or 0)
             height = float(request.POST.get("height") or 0)
@@ -66,26 +149,19 @@ def create_member(request):
         except ValueError:
             paid_amount = 0
 
-        # Plan price mapping
-        plan_prices = {
-            "Silver": 1000,
-            "Gold": 2500,
-            "Premium": 5000,
-            "Platinum": 8000,
-            "Diamond": 12000,
-        }
-
-        plan_amount = plan_prices.get(plan_name, 0)
+        plan_amount = float(plan.price or 0)
         due_amount = max(plan_amount - paid_amount, 0)
+
         photo = request.FILES.get("photo")
+
         member = Member.objects.create(
             id=next_id,
             name=request.POST.get("name"),
-            phone=request.POST.get("phone"),
+            phone=phone,
             email=request.POST.get("email"),
-            plan=plan_name,
+            plan=plan.name,   # if your Member.plan field is CharField
             join_date=join_date,
-            photo=photo, 
+            photo=photo,
             height=height,
             weight=weight,
             bmi=bmi,
@@ -98,37 +174,38 @@ def create_member(request):
             due_amount=due_amount,
             expiry_date=expiry_date,
             status="Active",
-
         )
+
         return JsonResponse({
             "id": member.id,
             "name": member.name,
             "plan": member.plan,
             "status": member.status,
             "expiry_date": member.expiry_date,
-            "bmi": member.bmi, 
-            "due":member.due_amount
+            "bmi": member.bmi,
+            "due": member.due_amount
         })
 
     except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500) 
+        return JsonResponse({"error": str(e)}, status=500)
+    
     
 
-
+from datetime import date
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 
 @csrf_exempt
 def get_members(request):
     if request.method == "GET":
         today = date.today()
-        members = Member.objects.all()
+        members = Member.objects.all().order_by("id")   # keep ID order
         data = []
 
         for member in members:
-            # paused members stay paused
             if member.is_paused:
                 member.status = "Paused"
 
-            # normal expiry logic
             elif member.expiry_date:
                 if member.expiry_date < today:
                     days_expired = (today - member.expiry_date).days
@@ -166,17 +243,7 @@ def get_members(request):
                 "photo": member.photo.url if member.photo else None,
             })
 
-        # Expired members first, ordered by expiry_date ascending
-        # Others after that, also by expiry_date ascending if available
-        data.sort(
-            key=lambda m: (
-                0 if m["status"] == "Expired" else 1,
-                m["expiry_date"] or date.max
-            )
-        )
-
         return JsonResponse(data, safe=False)
-
 
 @csrf_exempt
 def get_member(request, member_id):
@@ -431,6 +498,7 @@ def delete_branch(request, branch_id):
 
         except Branch.DoesNotExist:
             return JsonResponse({"error": "Branch not found"},status=404)
+            
 
 from django.db.models import Sum
 from datetime import date, timedelta
@@ -630,62 +698,6 @@ def get_dashboard_stats(request):
         })
 
 
-# @csrf_exempt
-# def pause_member(request, member_id):
-#     if request.method == "POST":
-#         try:
-#             member = Member.objects.get(id=member_id)
-#         except Member.DoesNotExist:
-#             return JsonResponse({"message": "Member not found"},status=404)
-
-#         if member.status == "Paused":
-#             return JsonResponse({"message": "Member is already paused"},status=400)
-
-#         member.status = "Paused"
-#         member.pause_start_date = date.today()
-#         member.save()
-
-#         return JsonResponse({
-#             "message": "Membership paused",
-#             "status": "Paused"
-#         })
-    
-
-
-
-# @csrf_exempt
-# def resume_member(request, member_id):
-#     if request.method == "POST":
-#         try:
-#             member = Member.objects.get(id=member_id)
-#         except Member.DoesNotExist:
-#             return JsonResponse(
-#                 {"message": "Member not found"},
-#                 status=404
-#             )
-
-#         if member.status != "Paused":
-#             return JsonResponse({"message": "Member is not paused"},status=400)
-
-#         days_paused = (
-#             date.today() - member.pause_start_date
-#         ).days
-
-#         member.expiry_date = (
-#             member.expiry_date +
-#             timedelta(days=days_paused)
-#         )
-
-#         member.status = "Active"
-#         member.pause_start_date = None
-#         member.save()
-
-#         return JsonResponse({
-#             "message": "Membership resumed",
-#             "status": "Active",
-#             "new_expiry_date": member.expiry_date
-#         })
-    
 
 from django.db.models import Sum
 from django.http import JsonResponse
@@ -1241,19 +1253,73 @@ def create_staff(request):
         status=405
     )
 
+from datetime import date
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Sum
+from .models import Staffs, Payment
+
+
 @csrf_exempt
 def get_staffs(request):
-        today = date.today()
-        staffs = list(Staffs.objects.order_by('id').values())
-        return JsonResponse(staffs, safe=False)
+    staffs = Staffs.objects.order_by("id")
+    data = []
+
+    for staff in staffs:
+        paid_amount = Payment.objects.filter(
+            staff=staff,
+            payment_type="Salary"
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        due_amount = max(float(staff.salary) - float(paid_amount), 0)
+
+        data.append({
+            "id": staff.id,
+            "name": staff.name,
+            "role": staff.role,
+            "specialization": staff.specialization,
+            "phone": staff.phone,
+            "experience": staff.experience,
+            "joining_date": staff.joining_date,
+            "salary": str(staff.salary),
+            "paid_amount": str(paid_amount),
+            # "due_amount": str(due_amount),
+            "status": staff.status,
+        })
+
+    return JsonResponse(data, safe=False)
+
 
 @csrf_exempt
 def get_staff(request, staff_id):
-        try:
-            staff = Staffs.objects.values().get(id=staff_id)
-            return JsonResponse(staff)
-        except Staffs.DoesNotExist:
-            return JsonResponse({"error": "Staff not found"},status=404)
+    try:
+        staff = Staffs.objects.get(id=staff_id)
+
+        paid_amount = Payment.objects.filter(
+            staff=staff,
+            payment_type="Salary"
+        ).aggregate(total=Sum("amount"))["total"] or 0
+
+        due_amount = max(float(staff.salary) - float(paid_amount), 0)
+
+        data = {
+            "id": staff.id,
+            "name": staff.name,
+            "role": staff.role,
+            "specialization": staff.specialization,
+            "phone": staff.phone,
+            "experience": staff.experience,
+            "joining_date": staff.joining_date,
+            "salary": str(staff.salary),
+            "paid_amount": str(paid_amount),
+            # "due_amount": str(due_amount),
+            "status": staff.status,
+        }
+
+        return JsonResponse(data)
+
+    except Staffs.DoesNotExist:
+        return JsonResponse({"error": "Staff not found"}, status=404)
 
 
 
@@ -1632,6 +1698,7 @@ def add_staff_payment(request, staff_id):
         "staff_name": staff.name,
         "amount": str(payment.amount)
     }, status=201)
+
 
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt

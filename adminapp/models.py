@@ -79,35 +79,17 @@ class Branch(models.Model):
 
 
 class Payment(models.Model):
-    member = models.ForeignKey(
-        Member,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True
-    )
-
-    staff = models.ForeignKey(
-        Staffs,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True
-    )
-
+    member = models.ForeignKey(Member,on_delete=models.CASCADE,null=True,blank=True)
+    staff = models.ForeignKey(Staffs,on_delete=models.CASCADE,null=True,blank=True)
+    PAYMENT_METHOD_CHOICES = [
+        ("Cash", "Cash"),
+        ("Card", "Card"),
+        ("UPI", "UPI"),
+        ("Wallet", " Wallet"),]
     amount = models.DecimalField(max_digits=10, decimal_places=2)
-
     payment_date = models.DateField()
-
-    payment_method = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    payment_type = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
+    payment_method = models.CharField(max_length=50,choices=PAYMENT_METHOD_CHOICES,blank=True,null=True)
+    payment_type = models.CharField(max_length=100,blank=True,null=True)
 
 class Expense(models.Model):
 
