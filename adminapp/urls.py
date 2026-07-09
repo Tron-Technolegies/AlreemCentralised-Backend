@@ -9,7 +9,6 @@ urlpatterns = [
     path("admin_profile_view/", views.admin_profile_view, name="admin_profile_view/"),
     path("change_password/", views.change_password, name="change_password/"),
 
-
     path('members/', views.get_members, name='get_members'),
     path('members/create/', views.create_member, name='create_member'),
     path("members/get_payments/",views.get_payments,name="get_payments"),

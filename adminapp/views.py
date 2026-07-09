@@ -580,7 +580,7 @@ def get_dashboard_stats(request):
         )["total"] or 0
 
         product_today_income = Sales_product.objects.filter(
-            sold_at=today
+            sold_at__date=today
         ).aggregate(total=Sum("total_amount"))["total"] or 0
 
         product_monthly_income = Sales_product.objects.filter(
@@ -588,15 +588,15 @@ def get_dashboard_stats(request):
             sold_at__month=today.month
         ).aggregate(total=Sum("total_amount"))["total"] or 0
 
-        last_month_membership_income = Payment.objects.filter(
-            payment_date__year=last_year,
-            payment_date__month=last_month
-        ).aggregate(total=Sum("amount"))["total"] or 0
-
         last_month_product_income = Sales_product.objects.filter(
             sold_at__year=last_year,
             sold_at__month=last_month
         ).aggregate(total=Sum("total_amount"))["total"] or 0
+
+        last_month_membership_income = Payment.objects.filter(
+            payment_date__year=last_year,
+            payment_date__month=last_month
+        ).aggregate(total=Sum("amount"))["total"] or 0
 
         last_month_income = (
             last_month_membership_income +
@@ -795,31 +795,28 @@ def renew_member(request, member_id):
 
     plan_name = request.POST.get("plan")
 
-    plan_days = {
-        "Silver": 30,
-        "Gold": 60,
-        "Premium": 90,
-        "Platinum": 180,
-        "Diamond": 365,
-    }
+    if not plan_name:
+        return JsonResponse({"message": "Plan is required"}, status=400)
 
-    duration = plan_days.get(plan_name)
-
-    if not duration:
+    try:
+        plan = Plan.objects.get(name=plan_name)
+    except Plan.DoesNotExist:
         return JsonResponse({"message": "Invalid plan"}, status=400)
+
+    duration = plan.duration   # use your actual field name here
 
     today = date.today()
 
-    # Active member renewing before expiry
+    # if current membership is still active, extend from current expiry
     if member.expiry_date and member.expiry_date >= today:
-        member.expiry_date += timedelta(days=duration)
+        member.expiry_date = member.expiry_date + timedelta(days=duration)
     else:
-        # Expired / Blocked member
+        # if expired / blocked, start from today
         member.expiry_date = today + timedelta(days=duration)
 
-    member.plan = plan_name
+    member.plan = plan.name
     member.status = "Active"
-
+    member.is_paused = False   # optional, useful if renewed member was paused/blocked
     member.save()
 
     return JsonResponse({
@@ -830,7 +827,6 @@ def renew_member(request, member_id):
         "new_expiry_date": member.expiry_date,
         "status": member.status,
     })
-
 
 
 
