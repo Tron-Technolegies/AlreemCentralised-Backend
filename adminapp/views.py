@@ -88,8 +88,6 @@ def admin_profile_view(request):
 
 #.......................... MEMBERS
 
-
-
 @csrf_exempt
 def create_member(request):
     if request.method != "POST":
@@ -102,11 +100,22 @@ def create_member(request):
 
         # Inputs
         plan_id = request.POST.get("plan")
+        branch_id = request.POST.get("branch")
         join_date_str = request.POST.get("join_date")
         phone = request.POST.get("phone", "").strip()
+        email = request.POST.get("email", "").strip().lower()
+
+        if email and Member.objects.filter(email=email).exists():
+            return JsonResponse(
+                {"error": "Email already exists"},
+                status=400
+            )        
 
         if not plan_id:
             return JsonResponse({"error": "Plan is required"}, status=400)
+
+        if not branch_id:
+            return JsonResponse({"error": "Branch is required"}, status=400)
 
         if not join_date_str:
             return JsonResponse({"error": "Join date is required"}, status=400)
@@ -118,14 +127,32 @@ def create_member(request):
                 status=400
             )
 
+        # duplicate phone number
+        if Member.objects.filter(phone=phone).exists():  
+            return JsonResponse(
+                {"error": "Mobile number already exists"},
+                status=400
+            )        
+
         # Get selected plan from DB
         try:
             plan = Plan.objects.get(id=plan_id)
         except Plan.DoesNotExist:
             return JsonResponse({"error": "Invalid plan selected"}, status=400)
 
+        try:
+            branch = Branch.objects.get(id=branch_id)
+        except Branch.DoesNotExist:
+            return JsonResponse({"error": "Invalid Branch selected"}, status=400)        
+
         # Parse join date
-        join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
+        try:
+            join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            return JsonResponse(
+                {"error": "Invalid join date"},
+                status=400
+            )
 
         # Expiry from plan duration
         duration = int(plan.duration or 0)
@@ -147,7 +174,26 @@ def create_member(request):
         try:
             paid_amount = float(request.POST.get("paid_amount") or 0)
         except ValueError:
-            paid_amount = 0
+            return JsonResponse(
+                {"error": "Invalid paid amount"},
+                status=400
+            )
+
+        if paid_amount < 0:
+            return JsonResponse(
+                {"error": "Paid amount cannot be negative"},
+                status=400
+            )
+
+        plan_amount = float(plan.price or 0)
+
+        if paid_amount > plan_amount:
+            return JsonResponse(
+                {"error": "Paid amount cannot exceed plan price"},
+                status=400
+            )
+
+        due_amount = plan_amount - paid_amount
 
         plan_amount = float(plan.price or 0)
         due_amount = max(plan_amount - paid_amount, 0)
@@ -158,8 +204,9 @@ def create_member(request):
             id=next_id,
             name=request.POST.get("name"),
             phone=phone,
-            email=request.POST.get("email"),
+            email=email,
             plan=plan.name,   # if your Member.plan field is CharField
+            branch=branch.name,
             join_date=join_date,
             photo=photo,
             height=height,
@@ -177,15 +224,19 @@ def create_member(request):
         )
 
         return JsonResponse({
-            "id": member.id,
-            "name": member.name,
-            "plan": member.plan,
-            "status": member.status,
-            "expiry_date": member.expiry_date,
-            "bmi": member.bmi,
-            "due": member.due_amount
+            "status": True,
+            "message": "Member created successfully",
+            "data": {
+                "id": member.id,
+                "name": member.name,
+                "plan": member.plan,
+                "branch": member.branch,
+                "status": member.status,
+                "expiry_date": member.expiry_date,
+                "bmi": member.bmi,
+                "due": member.due_amount,
+            }
         })
-
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
     
@@ -232,6 +283,7 @@ def get_members(request):
                 "weight": member.weight,
                 "bmi": member.bmi,
                 "plan": member.plan,
+                "branch": member.branch,
                 "join_date": member.join_date,
                 "expiry_date": member.expiry_date,
                 "pause_start_date": member.pause_start_date,
@@ -264,6 +316,7 @@ def get_member(request, member_id):
                 "weight": member.weight,
                 "bmi": member.bmi,
                 "plan": member.plan,
+                "branch":member.branch,
                 "join_date": member.join_date,
                 "expiry_date": member.expiry_date,
                 "pause_start_date": member.pause_start_date,
