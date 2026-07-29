@@ -1,6 +1,6 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Enquiry, Expense, Payment, Product, Sales_product, Member,Expense
+from .models import Branch, Enquiry, Expense, Payment, Product, Sales_product, Member,Expense,Income
 import json
 from datetime import datetime
 from django.utils import timezone
@@ -250,7 +250,7 @@ from django.views.decorators.csrf import csrf_exempt
 def get_members(request):
     if request.method == "GET":
         today = date.today()
-        members = Member.objects.all().order_by("id")   # keep ID order
+        members = Member.objects.all().order_by("-id")   # keep ID order
         data = []
 
         for member in members:
@@ -521,6 +521,42 @@ def get_branches(request):
         return JsonResponse(branches, safe=False)
 
 
+
+@csrf_exempt
+def get_branch_members(request, branch_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"},status=405)
+
+    try:
+        branch = Branch.objects.get(id=branch_id)
+
+        # Only active members
+        members = Member.objects.filter(branch=branch.name,status="Active"
+        )
+
+        member_data = []
+        for member in members:
+            member_data.append({
+                "id": member.id,
+                "name": member.name,
+                "phone": member.phone,
+                "email": member.email,
+                "plan": member.plan,
+            })
+
+        return JsonResponse({
+            "branch": branch.name,
+            "customers": member_data
+        })
+
+    except Branch.DoesNotExist:
+        return JsonResponse({"error": "Branch not found"},status=404)
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)},status=500)
+
+
+
 @csrf_exempt
 def update_branch(request, branch_id):
     if request.method == "POST":
@@ -568,6 +604,7 @@ def get_dashboard_stats(request):
     if request.method == "GET":
 
         today = date.today()
+
         if today.month == 1:
             last_month = 12
             last_year = today.year - 1
@@ -575,136 +612,222 @@ def get_dashboard_stats(request):
             last_month = today.month - 1
             last_year = today.year
 
-        blocked_members = Member.objects.filter(status="Blocked").count()
+
+        # ================= MEMBERS =================
+
         total_members = Member.objects.count()
-        active_members = Member.objects.filter(status="Active").count()
-        expired_members = Member.objects.filter(status="Expired").count()
-        paused_members = Member.objects.filter(is_paused=True).count()
-        pending_payments = Member.objects.filter(due_amount__gt=0).count()
+
+        active_members = Member.objects.filter(
+            status="Active"
+        ).count()
+
+        blocked_members = Member.objects.filter(
+            status="Blocked"
+        ).count()
+
+        expired_members = Member.objects.filter(
+            status="Expired"
+        ).count()
+
+        paused_members = Member.objects.filter(
+            is_paused=True
+        ).count()
+
+        pending_payments = Member.objects.filter(
+            due_amount__gt=0
+        ).count()
+
+
+
+        # ================= UPCOMING EXPIRIES =================
+
         next_week = today + timedelta(days=7)
-        # expiries = Member.objects.filter(expiry_date__range=[today, next_week]).order_by('expiry_date')
-        expiries = Member.objects.filter(status="Active",expiry_date__gte=today,expiry_date__lte=next_week).order_by('expiry_date')
+
+        expiries = Member.objects.filter(
+            status="Active",
+            expiry_date__gte=today,
+            expiry_date__lte=next_week
+        ).order_by("expiry_date")
+
 
         upcoming_expiries_list = [
-                {
-                    "name": m.name,
-                    "phone": m.phone,
-                    "expiry_date": m.expiry_date,
-                    "due_amount": m.due_amount,
-                }
-                for m in expiries
-            ]
+            {
+                "name": m.name,
+                "phone": m.phone,
+                "expiry_date": m.expiry_date,
+                "due_amount": m.due_amount
+            }
+            for m in expiries
+        ]
 
-        recent = Member.objects.order_by('-id')[:5]
+
+
+        # ================= RECENT MEMBERS =================
+
+        recent = Member.objects.order_by("-id")[:5]
 
         recent_registrations = [
             {
                 "name": m.name,
-
                 "phone": m.phone,
-
-                "email":m.email,
-                
+                "email": m.email,
                 "plan": m.plan,
-                
                 "join_date": m.join_date
             }
             for m in recent
         ]
-        
 
-        # Membership income
-        membership_total_income = Payment.objects.aggregate(
+
+
+        # ================= INCOME =================
+
+        total_income = Income.objects.aggregate(
             total=Sum("amount")
         )["total"] or 0
 
-        membership_today_income = Payment.objects.filter(
-            payment_date=today
-        ).aggregate(total=Sum("amount"))["total"] or 0
 
-        membership_monthly_income = Payment.objects.filter(
-            payment_date__year=today.year,
-            payment_date__month=today.month
-        ).aggregate(total=Sum("amount"))["total"] or 0
+        today_income = Income.objects.filter(
+            date=today
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
 
-        # Product income
-        product_total_income = Sales_product.objects.aggregate(
+
+        monthly_income = Income.objects.filter(
+            date__year=today.year,
+            date__month=today.month
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+
+        last_month_income = Income.objects.filter(
+            date__year=last_year,
+            date__month=last_month
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+
+        # ================= PRODUCT SALES =================
+
+        total_sales = Sales_product.objects.aggregate(
             total=Sum("total_amount")
         )["total"] or 0
 
-        product_today_income = Sales_product.objects.filter(
+        today_sales = Sales_product.objects.filter(
             sold_at__date=today
-        ).aggregate(total=Sum("total_amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"] or 0
 
-        product_monthly_income = Sales_product.objects.filter(
+        monthly_sales = Sales_product.objects.filter(
             sold_at__year=today.year,
             sold_at__month=today.month
-        ).aggregate(total=Sum("total_amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"] or 0
 
-        last_month_product_income = Sales_product.objects.filter(
+        last_month_sales = Sales_product.objects.filter(
             sold_at__year=last_year,
             sold_at__month=last_month
-        ).aggregate(total=Sum("total_amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"] or 0
 
-        last_month_membership_income = Payment.objects.filter(
-            payment_date__year=last_year,
-            payment_date__month=last_month
-        ).aggregate(total=Sum("amount"))["total"] or 0
 
-        last_month_income = (
-            last_month_membership_income +
-            last_month_product_income
-        )
+        # ================= INCOME CATEGORY =================
 
-        # Combined income
-        total_income = membership_total_income + product_total_income
-        today_income = membership_today_income + product_today_income
-        monthly_income = membership_monthly_income + product_monthly_income
+        membership_income = Income.objects.filter(
+            category="Membership"
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
 
-#........................EXPENSE 
+
+        product_income = Income.objects.filter(
+            category="Product"
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+
+        admission_income = Income.objects.filter(
+            category="Other"
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+
+
+        # ================= EXPENSE =================
 
         total_expense = Expense.objects.aggregate(
             total=Sum("amount")
         )["total"] or 0
 
+
         today_expense = Expense.objects.filter(
             date=today
-        ).aggregate(total=Sum("amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
 
         monthly_expense = Expense.objects.filter(
             date__year=today.year,
             date__month=today.month
-        ).aggregate(total=Sum("amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
 
         last_month_expense = Expense.objects.filter(
             date__year=last_year,
             date__month=last_month
-        ).aggregate(total=Sum("amount"))["total"] or 0
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+
+
+
+        # ================= PROFIT / LOSS =================
+
+        today_profit = max(today_income - today_expense, 0)
+
+        total_profit = max(total_income - total_expense, 0)
+
+        monthly_profit = max(monthly_income - monthly_expense, 0)
+
+
+        today_loss = max(today_expense - today_income, 0)
+
+        total_loss = max(total_expense - total_income, 0)
+
+        monthly_loss = max(monthly_expense - monthly_income, 0)
+
+
 
         last_month_profit = max(
             last_month_income - last_month_expense,
             0
         )
 
-# .............................LOSS AND PROFIT
 
-        today_profit = max(today_income - today_expense, 0)
-        total_profit = max(total_income - total_expense, 0)
-        monthly_profit = max(monthly_income - monthly_expense, 0)
-        today_loss = max(today_expense - today_income, 0)
-        total_loss = max(total_expense - total_income, 0)
-        monthly_loss = max(monthly_expense - monthly_income, 0)
-        net_profit = total_profit
+
+        # ================= GROWTH =================
 
         revenue_growth = calculate_growth(
             monthly_income,
             last_month_income
         )
 
+
         expense_growth = calculate_growth(
             monthly_expense,
             last_month_expense
         )
+
 
         profit_growth = calculate_growth(
             monthly_profit,
@@ -712,100 +835,120 @@ def get_dashboard_stats(request):
         )
 
 
+        sales_growth = calculate_growth(
+            monthly_sales,
+            last_month_sales
+        )
+
+
+
         return JsonResponse({
+
             "total_members": total_members,
             "active_members": active_members,
             "blocked_members": blocked_members,
             "expired_members": expired_members,
             "paused_members": paused_members,
 
+
             "total_income": total_income,
             "today_income": today_income,
             "monthly_income": monthly_income,
 
-            "membership_total_income": membership_total_income,
-            "product_total_income": product_total_income,
+
+            "membership_income": membership_income,
+            "product_income": product_income,
+            "admission_income": admission_income,
+
 
             "total_expense": total_expense,
             "today_expense": today_expense,
             "monthly_expense": monthly_expense,
 
+
             "today_profit": today_profit,
             "total_profit": total_profit,
-            "monthly_profit":monthly_profit,
+            "monthly_profit": monthly_profit,
 
+            "total_sales": total_sales,
+            "today_sales": today_sales,
+            "monthly_sales": monthly_sales,
+
+            "sales_growth": sales_growth,
             "today_loss": today_loss,
             "total_loss": total_loss,
-            "monthly_loss":monthly_loss,
+            "monthly_loss": monthly_loss,
 
-            "net_profit": net_profit,
 
             "revenue_growth": revenue_growth,
             "expense_growth": expense_growth,
             "profit_growth": profit_growth,
 
+
             "pending_payments": pending_payments,
+
             "upcoming_expiries": len(upcoming_expiries_list),
             "upcoming_expiries_list": upcoming_expiries_list,
+
             "recent_registrations": recent_registrations
         })
 
 
 
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
-from django.shortcuts import get_object_or_404
+# from django.db.models import Sum
+# from django.http import JsonResponse
+# from django.views.decorators.csrf import csrf_exempt
+# from django.views.decorators.http import require_http_methods
+# from django.shortcuts import get_object_or_404
 
-@csrf_exempt
-@require_http_methods(["POST"])
-def add_payment(request, member_id):
+# @csrf_exempt
+# @require_http_methods(["POST"])
+# def add_payment(request, member_id):
 
-    member = get_object_or_404(Member, id=member_id)
+#     member = get_object_or_404(Member, id=member_id)
 
-    amount = request.POST.get("amount")
+#     amount = request.POST.get("amount")
 
-    if not amount:
-        return JsonResponse(
-            {"error": "Amount is required"},
-            status=400
-        )
+#     if not amount:
+#         return JsonResponse(
+#             {"error": "Amount is required"},
+#             status=400
+#         )
 
-    Payment.objects.create(
-        member=member,
-        amount=amount,
-        payment_date=request.POST.get("payment_date"),
-        payment_method=request.POST.get("payment_method"),
-        payment_type=request.POST.get("payment_type")
-    )
+#     Payment.objects.create(
+#         member=member,
+#         amount=amount,
+#         payment_date=request.POST.get("payment_date"),
+#         payment_method=request.POST.get("payment_method"),
+#         payment_type=request.POST.get("payment_type")
+#     )
 
-    total_paid = (
-        Payment.objects.filter(member=member)
-        .aggregate(total=Sum("amount"))["total"] or 0
-    )
+#     total_paid = (
+#         Payment.objects.filter(member=member)
+#         .aggregate(total=Sum("amount"))["total"] or 0
+#     )
 
-    # Get plan object using the plan name stored in member.plan
-    plan = get_object_or_404(Plan, name=member.plan)
+#     # Get plan object using the plan name stored in member.plan
+#     plan = get_object_or_404(Plan, name=member.plan)
 
-    member.paid_amount = total_paid
-    member.due_amount = max(
-        float(plan.price) - float(total_paid),
-        0
-    )
+#     member.paid_amount = total_paid
+#     member.due_amount = max(
+#         float(plan.price) - float(total_paid),
+#         0
+#     )
 
-    member.save()
+#     member.save()
 
-    return JsonResponse({
-        "message": "Payment recorded successfully",
-        "paid_amount": member.paid_amount,
-        "due_amount": member.due_amount
-    })
+#     return JsonResponse({
+#         "message": "Payment recorded successfully",
+#         "paid_amount": member.paid_amount,
+#         "due_amount": member.due_amount
+#     })
 
 
-def get_single_payment(request, member_id):
-    payments = Payment.objects.filter(member_id=member_id).values()
-    return JsonResponse(list(payments),safe=False)
+# def get_single_payment(request, member_id):
+#     payments = Payment.objects.filter(member_id=member_id).values()
+#     return JsonResponse(list(payments),safe=False)
 
 
 def get_payments(request):
@@ -1039,34 +1182,34 @@ def get_products(request):
 
     return JsonResponse(data, safe=False)
 
-@csrf_exempt
-def get_single_product(request, product_id):
-    if request.method == "GET":
-        try:
-            product = Product.objects.get(id=product_id)
+# @csrf_exempt
+# def get_single_product(request, product_id):
+#     if request.method == "GET":
+#         try:
+#             product = Product.objects.get(id=product_id)
 
-            data = {
-                "id": product.id,
-                "name": product.name,
-                "description": product.description,
-                "price": product.price,
-                "stock": product.stock,
-                "category": product.category,
-                # "image": product.image.url if product.image else None,
-            }
+#             data = {
+#                 "id": product.id,
+#                 "name": product.name,
+#                 "description": product.description,
+#                 "price": product.price,
+#                 "stock": product.stock,
+#                 "category": product.category,
+#                 # "image": product.image.url if product.image else None,
+#             }
 
-            return JsonResponse(data, safe=False)
+#             return JsonResponse(data, safe=False)
 
-        except Product.DoesNotExist:
-            return JsonResponse(
-                {"error": "Product not found"},
-                status=404
-            )
+#         except Product.DoesNotExist:
+#             return JsonResponse(
+#                 {"error": "Product not found"},
+#                 status=404
+#             )
 
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=400
-    )
+#     return JsonResponse(
+#         {"error": "Invalid request method"},
+#         status=400
+#     )
 
 # UPDATE
 
@@ -1176,9 +1319,9 @@ def sell_product(request):
         "sale_id": sale.id
     })
 
-@csrf_exempt      
+@csrf_exempt
 def sales_list(request):
-    sales = Sales_product.objects.select_related("product").all().order_by("-sold_at")
+    sales = Sales_product.objects.select_related("product", "member").all().order_by("-sold_at")
 
     data = []
 
@@ -1188,42 +1331,44 @@ def sales_list(request):
             "member_id": sale.member.id if sale.member else None,
             "member_name": sale.member.name if sale.member else None,
             "product": sale.product.name,
+            "category": sale.product.category,   # <-- Add this line
             "quantity": sale.quantity,
-            "payment_method":sale.payment_method,
+            "payment_method": sale.payment_method,
             "unit_price": float(sale.unit_price),
             "total_amount": float(sale.total_amount),
-            "sold_at": sale.sold_at.strftime("%d-%m-%Y %H:%M")
+            "sold_at": sale.sold_at.strftime("%d-%m-%Y %H:%M"),
         })
+
     return JsonResponse({
         "success": True,
         "sales": data
     })
 
 
-def today_sales(request):
-    today = timezone.now().date()
+# def today_sales(request):
+#     today = timezone.now().date()
 
-    sales = Sales_product.objects.filter(
-        sold_at__date=today
-    )
+#     sales = Sales_product.objects.filter(
+#         sold_at__date=today
+#     )
 
-    total_sales = sales.aggregate(
-        total=Sum("total_amount")
-    )["total"] or 0
+#     total_sales = sales.aggregate(
+#         total=Sum("total_amount")
+#     )["total"] or 0
 
-    total_products_sold = sales.aggregate(
-        total=Sum("quantity")
-    )["total"] or 0
+#     total_products_sold = sales.aggregate(
+#         total=Sum("quantity")
+#     )["total"] or 0
 
-    return JsonResponse({
-        "sales": [
-            {
-                "today_sales": float(total_sales),
-                "products_sold": total_products_sold,
-                "sales_count": sales.count()
-            }
-        ]
-    })
+#     return JsonResponse({
+#         "sales": [
+#             {
+#                 "today_sales": float(total_sales),
+#                 "products_sold": total_products_sold,
+#                 "sales_count": sales.count()
+#             }
+#         ]
+#     })
 
 @csrf_exempt
 def validate_member(request, member_id):
@@ -1311,7 +1456,7 @@ from .models import Staffs, Payment
 
 @csrf_exempt
 def get_staffs(request):
-    staffs = Staffs.objects.order_by("id")
+    staffs = Staffs.objects.order_by("-id")
     data = []
 
     for staff in staffs:
@@ -1479,15 +1624,27 @@ def resume_member(request, member_id):
 
     paused_days = (resume_date - pause_start).days
 
-    if paused_days < 0:
-        paused_days = 0
+    if paused_days <= 0:
+        return JsonResponse({
+            "error": "Resume date must be after pause date."
+        }, status=400)
+
+    remaining_days = 15 - member.used_pause_days
+
+    if paused_days > remaining_days:
+        return JsonResponse({
+            "error": "Pause limit exceeded.",
+            "allowed_days": remaining_days,
+            "used_days": member.used_pause_days,
+            "max_limit": 15
+        }, status=400)
 
     member.expiry_date = member.expiry_date + timedelta(days=paused_days)
 
     member.is_paused = False
     member.pause_start_date = None
     member.status = "Active"
-
+    member.used_pause_days += paused_days
     member.save()
 
     return JsonResponse({
@@ -1633,17 +1790,19 @@ def pause_member(request, member_id):
 
 
 
-import json
-from django.http import JsonResponse
-from .models import Member, Payment
 @csrf_exempt
 def add_member_payment(request, member_id):
     if request.method == "POST":
+
         data = json.loads(request.body)
+
         print("member_id =", member_id)
+
         member = Member.objects.get(id=member_id)
 
+
         amount = float(data.get("amount", 0))
+
 
         # Amount must be positive
         if amount <= 0:
@@ -1652,12 +1811,14 @@ def add_member_payment(request, member_id):
                 status=400
             )
 
+
         # Already fully paid
         if float(member.due_amount) <= 0:
             return JsonResponse(
                 {"error": "Membership fee already fully paid"},
                 status=400
             )
+
 
         # Prevent overpayment
         if amount > float(member.due_amount):
@@ -1666,21 +1827,32 @@ def add_member_payment(request, member_id):
                 status=400
             )
 
-        Payment.objects.create(
-            member=member,
+
+        # Save money directly into Income model
+        Income.objects.create(
+            member=member,   # important
+            title="Membership",
+            name=member.name,
+            phone=member.phone,
+            category="membership",
             amount=amount,
-            payment_date=data.get("payment_date"),
-            payment_type=data.get("payment_type"),
             payment_method=data.get("payment_method"),
+            date=data.get("payment_date"),
+            description=f"Membership payment received from {member.name}",
+            is_system_generated=True
         )
+
 
         member.paid_amount += amount
         member.due_amount -= amount
 
+
         if member.due_amount < 0:
             member.due_amount = 0
 
+
         member.save()
+
 
         return JsonResponse({
             "message": "Member payment recorded",
@@ -1688,6 +1860,7 @@ def add_member_payment(request, member_id):
             "due_amount": member.due_amount,
             "payment_completed": member.due_amount == 0
         })
+
 
     return JsonResponse(
         {"error": "Invalid request method"},
@@ -1733,13 +1906,18 @@ def add_staff_payment(request, staff_id):
     )
 
     # 2) Save in Expense table -> for expense/profit calculation
+
     Expense.objects.create(
-        title=f"Salary - {staff.name}",
-        category="salary",
-        amount=amount,
-        date=payment_date,
-        description=f"Salary paid to {staff.name} via {payment_method}"
-    )
+    title="Salary",
+    name=staff.name,
+    phone=staff.phone,
+    category="salary",
+    amount=amount,
+    payment_method=payment_method,
+    date=payment_date,
+    description=f"Salary paid to {staff.name}",
+    is_system_generated=True
+)
 
     return JsonResponse({
         "message": "Staff payment recorded successfully",
@@ -1749,45 +1927,45 @@ def add_staff_payment(request, staff_id):
     }, status=201)
 
 
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import Payment
+# from django.http import JsonResponse
+# from django.views.decorators.csrf import csrf_exempt
+# from .models import Payment
 
 
-@csrf_exempt
-def transactions(request):
-    payments = Payment.objects.select_related("member", "staff").order_by("-payment_date", "-id")
+# @csrf_exempt
+# def transactions(request):
+#     payments = Payment.objects.select_related("member", "staff").order_by("-payment_date", "-id")
 
-    data = []
+#     data = []
 
-    for payment in payments:
-        if payment.member:
-            data.append({
-                "id": payment.id,
-                "transaction_for": "Member",
-                "person_id": payment.member.id,
-                "name": payment.member.name,
-                "phone": payment.member.phone,
-                "amount": payment.amount,
-                "payment_type": payment.payment_type,
-                "payment_method": payment.payment_method,
-                "payment_date": payment.payment_date,
-            })
+#     for payment in payments:
+#         if payment.member:
+#             data.append({
+#                 "id": payment.id,
+#                 "transaction_for": "Member",
+#                 "person_id": payment.member.id,
+#                 "name": payment.member.name,
+#                 "phone": payment.member.phone,
+#                 "amount": payment.amount,
+#                 "payment_type": payment.payment_type,
+#                 "payment_method": payment.payment_method,
+#                 "payment_date": payment.payment_date,
+#             })
 
-        elif payment.staff:
-            data.append({
-                "id": payment.id,
-                "transaction_for": "Staff",
-                "person_id": payment.staff.id,
-                "name": payment.staff.name,
-                "phone": payment.staff.phone,
-                "amount": payment.amount,
-                "payment_type": payment.payment_type,
-                "payment_method": payment.payment_method,
-                "payment_date": payment.payment_date,
-            })
+#         elif payment.staff:
+#             data.append({
+#                 "id": payment.id,
+#                 "transaction_for": "Staff",
+#                 "person_id": payment.staff.id,
+#                 "name": payment.staff.name,
+#                 "phone": payment.staff.phone,
+#                 "amount": payment.amount,
+#                 "payment_type": payment.payment_type,
+#                 "payment_method": payment.payment_method,
+#                 "payment_date": payment.payment_date,
+#             })
 
-    return JsonResponse(data, safe=False)
+#     return JsonResponse(data, safe=False)
 
 
 
@@ -1854,3 +2032,236 @@ def delete_enquiry(request, enquiry_id):
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
 
+@csrf_exempt
+def add_expense(request):
+
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Invalid method"},
+            status=405
+        )
+
+    try:
+        data = json.loads(request.body)
+
+        expense = Expense.objects.create(
+            title=data.get("title"),
+            name=data.get("name"),
+            phone=data.get("phone"),
+            category=data.get("category"),
+            description=data.get("description"),
+            amount=data.get("amount"),
+            payment_method=data.get("payment_method"),
+            date=data.get("date"),
+            is_system_generated=False
+        )
+
+        return JsonResponse({
+            "message": "Expense added successfully",
+            "id": expense.id
+        }, status=201)
+
+
+    except Exception as e:
+        return JsonResponse(
+            {"error": str(e)},
+            status=400
+        )
+
+
+
+@csrf_exempt
+def expenses(request):
+
+    if request.method != "GET":
+        return JsonResponse(
+            {"error": "Invalid request method"},
+            status=405
+        )
+
+    expenses = Expense.objects.all().order_by("-date", "-id")
+
+    data = []
+
+    for expense in expenses:
+        data.append({
+            "id": expense.id,
+            "title": expense.title,
+            "name": expense.name,
+            "phone": expense.phone,
+            "category": expense.category,
+            "description": expense.description,
+            "amount": str(expense.amount),
+            "payment_method": expense.payment_method,
+            "date": expense.date.strftime("%Y-%m-%d"),
+            "type": "Salary" if expense.is_system_generated else "Additional"
+        })
+
+    return JsonResponse(
+        data,
+        safe=False
+    )
+
+
+@csrf_exempt
+def add_income(request):
+
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Invalid request method"},
+            status=405
+        )
+
+    try:
+        data = json.loads(request.body)
+
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {"error": "Invalid JSON data"},
+            status=400
+        )
+
+    member = None
+
+    if data.get("member_id"):
+        try:
+            member = Member.objects.get(id=data.get("member_id"))
+        except Member.DoesNotExist:
+            return JsonResponse(
+                {"error": "Member not found"},
+                status=404
+            )
+
+
+    income = Income.objects.create(
+        member=member,
+        title=data.get("title"),
+        name=data.get("name"),
+        phone=data.get("phone"),
+        category=data.get("category"),
+        description=data.get("description"),
+        amount=data.get("amount"),
+        payment_method=data.get(
+            "payment_method",
+            "cash"
+        ),
+        date=data.get("date"),
+        is_system_generated=False
+    )
+
+
+    return JsonResponse(
+        {
+            "message": "Additional income added successfully",
+            "income_id": income.id
+        },
+        status=201
+    )
+
+@csrf_exempt
+def incomes(request):
+
+    if request.method != "GET":
+        return JsonResponse(
+            {"error": "Invalid request method"},
+            status=405
+        )
+
+    incomes = Income.objects.all().order_by("-date", "-id")
+
+    data = []
+
+    for income in incomes:
+        data.append({
+            "id": income.id,
+            "title": income.title,
+            "name": income.name,
+            "phone": income.phone,
+            "category": income.category,
+            "description": income.description,
+            "amount": str(income.amount),
+            "payment_method": income.payment_method,
+            "date": income.date.strftime("%Y-%m-%d"),
+            "type": "Membership" if income.is_system_generated else "Additional"
+        })
+
+    return JsonResponse(data,safe=False)
+
+
+@csrf_exempt
+def income_by_members(request):
+
+    basic_income = Income.objects.filter(
+        category="membership",
+        member__plan__in=["Silver", "Gold"]
+    ).aggregate(
+        total=Sum("amount")
+    )["total"] or 0
+
+
+    premium_income = Income.objects.filter(
+        category="membership",
+        member__plan__in=["Premium", "Platinum"]
+    ).aggregate(
+        total=Sum("amount")
+    )["total"] or 0
+
+
+    other_income = Income.objects.filter(
+        category__in=[
+            "registration",
+            "product_sale",
+            "other"
+        ]
+    ).aggregate(
+        total=Sum("amount")
+    )["total"] or 0
+
+
+    return JsonResponse({
+        "success": True,
+        "income": [
+            {
+                "name": "Basic Membership",
+                "amount": float(basic_income)
+            },
+            {
+                "name": "Premium Membership",
+                "amount": float(premium_income)
+            },
+            {
+                "name": "Other Income",
+                "amount": float(other_income)
+            }
+        ]
+    })
+
+
+@csrf_exempt
+def expense_by_category(request):
+
+    if request.method != "GET":
+        return JsonResponse(
+            {"error": "GET request only"},
+            status=405
+        )
+
+    expenses = (
+        Expense.objects
+        .values("category")
+        .annotate(total=Sum("amount"))
+        .order_by("-total")
+    )
+
+    data = []
+
+    for expense in expenses:
+        data.append({
+            "category": expense["category"],
+            "amount": float(expense["total"] or 0)
+        })
+
+    return JsonResponse({
+        "success": True,
+        "expenses": data
+    })

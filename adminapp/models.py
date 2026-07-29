@@ -25,6 +25,7 @@ class Member(models.Model):
     gender = models.CharField(max_length=20, blank=True, null=True)
     is_paused = models.BooleanField(default=False)
     pause_start_date = models.DateField(blank=True, null=True)
+    used_pause_days = models.PositiveIntegerField(default=0)
 
 
 class Plan(models.Model):
@@ -92,6 +93,8 @@ class Payment(models.Model):
     payment_method = models.CharField(max_length=50,choices=PAYMENT_METHOD_CHOICES,blank=True,null=True)
     payment_type = models.CharField(max_length=100,blank=True,null=True)
 
+
+
 class Expense(models.Model):
 
     CATEGORY_CHOICES = [
@@ -104,11 +107,71 @@ class Expense(models.Model):
         ("misc", "Miscellaneous"),
     ]
 
+    PAYMENT_METHOD_CHOICES = [
+        ("cash", "Cash"),
+        ("upi", "UPI"),
+        ("card", "Card"),
+        ("bank", "Bank Transfer"),
+    ]
+
     title = models.CharField(max_length=100)
-    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    date = models.DateField()
+    name = models.CharField(max_length=100)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+
+    category = models.CharField(
+        max_length=50,
+        choices=CATEGORY_CHOICES
+    )
+
     description = models.TextField(blank=True, null=True)
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2
+    )
+
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHOD_CHOICES,
+        default="cash"
+    )
+
+    date = models.DateField()
+
+    # True for salary entries created automatically
+    # False for manually added expenses
+    is_system_generated = models.BooleanField(default=False)
+
+
+class Income(models.Model):
+
+    CATEGORY_CHOICES = [
+        ("membership", "Membership Fee"),
+        ("product_sale", "Product Sale"),
+        ("registration", "Registration Fee"),
+        ("other", "Other"),
+    ]
+
+    PAYMENT_METHOD_CHOICES = [
+        ("cash", "Cash"),
+        ("upi", "UPI"),
+        ("card", "Card"),
+        ("bank", "Bank Transfer"),
+    ]
+    member = models.ForeignKey(Member,on_delete=models.SET_NULL,null=True,blank=True)
+    title = models.CharField(max_length=100)
+    name = models.CharField(max_length=100, blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    category = models.CharField(max_length=50,choices=CATEGORY_CHOICES)
+    description = models.TextField(blank=True,null=True)
+    amount = models.DecimalField(max_digits=10,decimal_places=2)
+    payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
+    date = models.DateField()
+
+    # True when generated automatically (example: product sale/member payment)
+    # False when manually added
+    is_system_generated = models.BooleanField(default=False)
+
 
 
 class TrainerPayment(models.Model):
@@ -132,10 +195,22 @@ class TrainerPayment(models.Model):
 
 class Product(models.Model):
     name = models.CharField(max_length=255)
+    CATEGORY_CHOICES = [
+        ("supplements", "Supplements"),
+        ("equipment", "Equipment"),
+        ("accessories", "Gym Accessories"),
+        ("apparel", "Gym Apparel"),
+        ("nutrition", "Nutrition & Drinks"),
+        ("other", "Other"),
+    ]
     description = models.TextField(blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.IntegerField(default=0)
-    category = models.CharField(max_length=100) 
+    category = models.CharField(
+        max_length=50,
+        choices=CATEGORY_CHOICES,
+        default="supplements"
+    )
     image = CloudinaryField("image",blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # payment_method = models.CharField(max_length=20, default="cash")

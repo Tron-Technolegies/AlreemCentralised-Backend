@@ -23,18 +23,21 @@ urlpatterns = [
 
     path('branches/', views.get_branches, name='get_branches'),
     path('branches/create/', views.create_branch, name='create_branch'),
+    path('get_branch_members/<int:branch_id>/', views.get_branch_members, name='get_branch_members'),
     path('branches/<int:branch_id>/update/', views.update_branch, name='update_branch'),
     path('branches/<int:branch_id>/delete/', views.delete_branch, name='delete_branch'),
+
     path('dashboard/', views.get_dashboard_stats,name="get_dashboard_stats"),
 
     path('members/pause/<str:member_id>/',views.pause_member,name="pause_member"),
     path('members/resume/<str:member_id>/',views.resume_member, name="resume_member"),
-    path('members/<str:member_id>/payments/add/', views.add_payment, name='add_payment'),
-    path('members/<str:member_id>/single_payment/', views.get_single_payment, name='get_single_payment'),
+    # path('members/<str:member_id>/payments/add/', views.add_payment, name='add_payment'),
+    # path('members/<str:member_id>/single_payment/', views.get_single_payment, name='get_single_payment'),
     path('members/<str:member_id>/renew/', views.renew_member, name='renew_member'),
 
     path('expenses/', views.add_expense, name='add_expense'),
     path('view_expenses/', views.view_expenses, name='view_expenses'),
+
     path('blocked_members/', views.get_blocked_members, name='blocked_members'),
     path("expiring_soon_members/", views.expiring_soon_members, name='expiring_soon_members'),
     path("expired_members/", views.expired_members, name='expired_members'),
@@ -43,13 +46,13 @@ urlpatterns = [
 
     path("products/", views.get_products,name="get_products"),
     path("products/create/", views.create_product,name="create_product"),
-    path("products/<int:product_id>/", views.get_single_product,name="get_single_product"),
+    # path("products/<int:product_id>/", views.get_single_product,name="get_single_product"),
     path("products/update/<int:product_id>/", views.update_product,name="update_product"),
     path("products/delete/<int:product_id>/", views.delete_product,name="delete_product"),
 
     path("sell_product/", views.sell_product,name="sell_product"),
     path("sales_list/", views.sales_list,name="sales_list"),
-    path("today_sales/", views.today_sales,name="today_sales"),
+    # path("today_sales/", views.today_sales,name="today_sales"),
     path("validate_member/<str:member_id>/", views.validate_member,name="validate_member"),
     path("one_sale/<int:sale_id>/", views.one_sale,name="one_sale"),
 
@@ -65,15 +68,20 @@ urlpatterns = [
 
     path('member/<str:member_id>/payments/add/', views.add_member_payment,name="add_member_payment"),
     path('staff/<int:staff_id>/payments/add/', views.add_staff_payment,name="add_staff_payment"),
-    path('transactions/', views.transactions, name="transactions"),
+    # path('transactions/', views.transactions, name="transactions"),
+    # path('external_expense/', views.transactions, name="transactions"),
 
     path("add_enquiries/",views.add_enquiry,name="enquiry"),
     path("enquiries/",views.view_enquiry,name="enquiry"),
     path("enquiries/<int:enquiry_id>/delete/", views.delete_enquiry, name="delete_enquiry"),
 
+    path("all_expenses/",views.expenses),
+    path("add_expense/",views.add_expense),
+    path("add_income/",views.add_income),
+    path("all_incomes/",views.incomes),
+    path("income_by_members/",views.income_by_members),
 
-
-    
+    path("expense_by_category/",views.expense_by_category),
 
 
 
