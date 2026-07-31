@@ -166,7 +166,7 @@ class Income(models.Model):
     description = models.TextField(blank=True,null=True)
     amount = models.DecimalField(max_digits=10,decimal_places=2)
     payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
-    date = models.DateField()
+    date = models.DateTimeField(auto_now_add=True)
 
     # True when generated automatically (example: product sale/member payment)
     # False when manually added

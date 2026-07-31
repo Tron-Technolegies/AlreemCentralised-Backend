@@ -85,7 +85,31 @@ def admin_profile_view(request):
     )
 
 
+def get_period_dates(period):
+    today = date.today()
 
+    if period == "daily":
+        return today, today
+
+    if period == "weekly":
+        return (
+            today - timedelta(days=today.weekday()),
+            today
+        )
+
+    if period == "monthly":
+        return (
+            today.replace(day=1),
+            today
+        )
+
+    if period == "yearly":
+        return (
+            today.replace(month=1, day=1),
+            today
+        )
+
+    return None, None
 #.......................... MEMBERS
 
 @csrf_exempt
@@ -599,357 +623,712 @@ def calculate_growth(current, previous):
 
     return round(((current - previous) / previous) * 100, 2)
 
+from datetime import date, timedelta
+from decimal import Decimal
+
+from django.db.models import Sum
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+from datetime import date, timedelta
+from decimal import Decimal
+
+from django.db.models import Sum
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+# Import your models
+from .models import Member, Income, Expense, Sales_product
+
+
+# =========================================================
+# PERIOD HELPER
+# =========================================================
+
+def get_period_dates(period):
+    """
+    Returns start_date and end_date for the selected period.
+    """
+
+    today = date.today()
+
+    if period == "daily":
+        start_date = today
+        end_date = today
+
+    elif period == "weekly":
+        # Monday -> today
+        start_date = today - timedelta(days=today.weekday())
+        end_date = today
+
+    elif period == "monthly":
+        # First day of current month -> today
+        start_date = today.replace(day=1)
+        end_date = today
+
+    elif period == "yearly":
+        # First day of current year -> today
+        start_date = today.replace(
+            month=1,
+            day=1
+        )
+        end_date = today
+
+    else:
+        return None, None
+
+    return start_date, end_date
+
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+
 @csrf_exempt
 def get_dashboard_stats(request):
-    if request.method == "GET":
 
-        today = date.today()
-
-        if today.month == 1:
-            last_month = 12
-            last_year = today.year - 1
-        else:
-            last_month = today.month - 1
-            last_year = today.year
-
-
-        # ================= MEMBERS =================
-
-        total_members = Member.objects.count()
-
-        active_members = Member.objects.filter(
-            status="Active"
-        ).count()
-
-        blocked_members = Member.objects.filter(
-            status="Blocked"
-        ).count()
-
-        expired_members = Member.objects.filter(
-            status="Expired"
-        ).count()
-
-        paused_members = Member.objects.filter(
-            is_paused=True
-        ).count()
-
-        pending_payments = Member.objects.filter(
-            due_amount__gt=0
-        ).count()
-
-
-
-        # ================= UPCOMING EXPIRIES =================
-
-        next_week = today + timedelta(days=7)
-
-        expiries = Member.objects.filter(
-            status="Active",
-            expiry_date__gte=today,
-            expiry_date__lte=next_week
-        ).order_by("expiry_date")
-
-
-        upcoming_expiries_list = [
+    if request.method != "GET":
+        return JsonResponse(
             {
-                "name": m.name,
-                "phone": m.phone,
-                "expiry_date": m.expiry_date,
-                "due_amount": m.due_amount
-            }
-            for m in expiries
-        ]
+                "error": "Invalid request method"
+            },
+            status=405
+        )
 
+    # =====================================================
+    # CURRENT DATE
+    # =====================================================
 
+    today = date.today()
 
-        # ================= RECENT MEMBERS =================
+    # =====================================================
+    # SELECTED PERIOD
+    # =====================================================
 
-        recent = Member.objects.order_by("-id")[:5]
+    period = request.GET.get(
+        "period",
+        "daily"
+    ).lower()
 
-        recent_registrations = [
+    start_date, end_date = get_period_dates(period)
+
+    if start_date is None:
+        return JsonResponse(
             {
-                "name": m.name,
-                "phone": m.phone,
-                "email": m.email,
-                "plan": m.plan,
-                "join_date": m.join_date
-            }
-            for m in recent
-        ]
+                "error": "Invalid period. "
+                         "Use daily, weekly, monthly or yearly."
+            },
+            status=400
+        )
 
+    # =====================================================
+    # LAST MONTH
+    # =====================================================
 
+    if today.month == 1:
 
-        # ================= INCOME =================
+        last_month = 12
+        last_year = today.year - 1
 
-        total_income = Income.objects.aggregate(
+    else:
+
+        last_month = today.month - 1
+        last_year = today.year
+
+    # =====================================================
+    # MEMBERS
+    # =====================================================
+
+    total_members = Member.objects.count()
+
+    active_members = Member.objects.filter(
+        status="Active"
+    ).count()
+
+    blocked_members = Member.objects.filter(
+        status="Blocked"
+    ).count()
+
+    expired_members = Member.objects.filter(
+        status="Expired"
+    ).count()
+
+    paused_members = Member.objects.filter(
+        is_paused=True
+    ).count()
+
+    pending_payments = Member.objects.filter(
+        due_amount__gt=0
+    ).count()
+
+    # =====================================================
+    # UPCOMING EXPIRIES
+    # =====================================================
+
+    next_week = today + timedelta(days=7)
+
+    expiries = Member.objects.filter(
+        status="Active",
+        expiry_date__gte=today,
+        expiry_date__lte=next_week
+    ).order_by("expiry_date")
+
+    upcoming_expiries_list = [
+        {
+            "name": member.name,
+            "phone": member.phone,
+            "expiry_date": member.expiry_date,
+            "due_amount": member.due_amount,
+        }
+        for member in expiries
+    ]
+
+    # =====================================================
+    # RECENT MEMBERS
+    # =====================================================
+
+    recent = Member.objects.order_by(
+        "-id"
+    )[:5]
+
+    recent_registrations = [
+        {
+            "name": member.name,
+            "phone": member.phone,
+            "email": member.email,
+            "plan": member.plan,
+            "join_date": member.join_date,
+        }
+        for member in recent
+    ]
+
+    # =====================================================
+    # ALL-TIME INCOME
+    #
+    # Membership income -> Income
+    # Product sales     -> Sales_product
+    # =====================================================
+
+    total_membership_income = (
+        Income.objects.aggregate(
             total=Sum("amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
+    total_product_income = (
+        Sales_product.objects.aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        today_income = Income.objects.filter(
-            date=today
+    total_income = (
+        total_membership_income
+        + total_product_income
+    )
+
+    # =====================================================
+    # SELECTED PERIOD INCOME
+    # =====================================================
+
+    period_membership_income = (
+        Income.objects.filter(
+            date__date__gte=start_date,
+            date__date__lte=end_date
         ).aggregate(
             total=Sum("amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
+    period_product_income = (
+        Sales_product.objects.filter(
+            sold_at__date__gte=start_date,
+            sold_at__date__lte=end_date
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        monthly_income = Income.objects.filter(
+    period_income = (
+        period_membership_income
+        + period_product_income
+    )
+
+    # =====================================================
+    # TODAY INCOME
+    # =====================================================
+
+    today_membership_income = (
+        Income.objects.filter(
+            date__date=today
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
+
+    today_product_income = (
+        Sales_product.objects.filter(
+            sold_at__date=today
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
+
+    today_income = (
+        today_membership_income
+        + today_product_income
+    )
+
+    # =====================================================
+    # MONTHLY INCOME
+    # =====================================================
+
+    monthly_membership_income = (
+        Income.objects.filter(
             date__year=today.year,
             date__month=today.month
         ).aggregate(
             total=Sum("amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
-
-        last_month_income = Income.objects.filter(
-            date__year=last_year,
-            date__month=last_month
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        # ================= PRODUCT SALES =================
-
-        total_sales = Sales_product.objects.aggregate(
-            total=Sum("total_amount")
-        )["total"] or 0
-
-        today_sales = Sales_product.objects.filter(
-            sold_at__date=today
-        ).aggregate(
-            total=Sum("total_amount")
-        )["total"] or 0
-
-        monthly_sales = Sales_product.objects.filter(
+    monthly_product_income = (
+        Sales_product.objects.filter(
             sold_at__year=today.year,
             sold_at__month=today.month
         ).aggregate(
             total=Sum("total_amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
-        last_month_sales = Sales_product.objects.filter(
-            sold_at__year=last_year,
-            sold_at__month=last_month
+    monthly_income = (
+        monthly_membership_income
+        + monthly_product_income
+    )
+
+    # =====================================================
+    # YEARLY INCOME
+    # =====================================================
+
+    yearly_membership_income = (
+        Income.objects.filter(
+            date__year=today.year
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
+
+    yearly_product_income = (
+        Sales_product.objects.filter(
+            sold_at__year=today.year
         ).aggregate(
             total=Sum("total_amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
+    yearly_income = (
+        yearly_membership_income
+        + yearly_product_income
+    )
 
-        # ================= INCOME CATEGORY =================
+    # =====================================================
+    # LAST MONTH INCOME
+    # =====================================================
 
-        membership_income = Income.objects.filter(
-            category="Membership"
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        product_income = Income.objects.filter(
-            category="Product"
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        admission_income = Income.objects.filter(
-            category="Other"
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-
-        # ================= EXPENSE =================
-
-        total_expense = Expense.objects.aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        today_expense = Expense.objects.filter(
-            date=today
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        monthly_expense = Expense.objects.filter(
-            date__year=today.year,
-            date__month=today.month
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
-
-
-        last_month_expense = Expense.objects.filter(
+    last_month_membership_income = (
+        Income.objects.filter(
             date__year=last_year,
             date__month=last_month
         ).aggregate(
             total=Sum("amount")
-        )["total"] or 0
+        )["total"]
+        or Decimal("0")
+    )
 
+    last_month_product_income = (
+        Sales_product.objects.filter(
+            sold_at__year=last_year,
+            sold_at__month=last_month
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    last_month_income = (
+        last_month_membership_income
+        + last_month_product_income
+    )
 
-        # ================= PROFIT / LOSS =================
+    # =====================================================
+    # SALES
+    # =====================================================
 
-        today_profit = max(today_income - today_expense, 0)
+    # ALL-TIME SALES
+    total_sales = (
+        Sales_product.objects.aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        total_profit = max(total_income - total_expense, 0)
+    # SELECTED PERIOD SALES
+    period_sales = (
+        Sales_product.objects.filter(
+            sold_at__date__gte=start_date,
+            sold_at__date__lte=end_date
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        monthly_profit = max(monthly_income - monthly_expense, 0)
+    # TODAY SALES
+    today_sales = (
+        Sales_product.objects.filter(
+            sold_at__date=today
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    # MONTHLY SALES
+    monthly_sales = (
+        Sales_product.objects.filter(
+            sold_at__year=today.year,
+            sold_at__month=today.month
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        today_loss = max(today_expense - today_income, 0)
+    # LAST MONTH SALES
+    last_month_sales = (
+        Sales_product.objects.filter(
+            sold_at__year=last_year,
+            sold_at__month=last_month
+        ).aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        total_loss = max(total_expense - total_income, 0)
+    # =====================================================
+    # INCOME CATEGORIES
+    # =====================================================
 
-        monthly_loss = max(monthly_expense - monthly_income, 0)
+    # MEMBERSHIP
+    membership_income = (
+        Income.objects.filter(
+            category="membership"
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    # PRODUCT
+    product_income = (
+        Sales_product.objects.aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    # OTHER
+    admission_income = (
+        Income.objects.filter(
+            category="other"
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        last_month_profit = max(
-            last_month_income - last_month_expense,
-            0
-        )
+    # =====================================================
+    # EXPENSE
+    # =====================================================
 
+    # ALL-TIME EXPENSE
+    total_expense = (
+        Expense.objects.aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    # SELECTED PERIOD EXPENSE
+    period_expense = (
+        Expense.objects.filter(
+            date__gte=start_date,
+            date__lte=end_date
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        # ================= GROWTH =================
+    # TODAY EXPENSE
+    today_expense = (
+        Expense.objects.filter(
+            date=today
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        revenue_growth = calculate_growth(
-            monthly_income,
-            last_month_income
-        )
+    # MONTHLY EXPENSE
+    monthly_expense = (
+        Expense.objects.filter(
+            date__year=today.year,
+            date__month=today.month
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
+    # LAST MONTH EXPENSE
+    last_month_expense = (
+        Expense.objects.filter(
+            date__year=last_year,
+            date__month=last_month
+        ).aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
-        expense_growth = calculate_growth(
-            monthly_expense,
-            last_month_expense
-        )
+    # =====================================================
+    # PROFIT / LOSS
+    # =====================================================
 
+    # SELECTED PERIOD
+    period_profit = (
+        period_income - period_expense
+    )
 
-        profit_growth = calculate_growth(
-            monthly_profit,
-            last_month_profit
-        )
+    period_loss = (
+        period_expense - period_income
+    )
 
+    # Keep profit/loss separated
+    if period_profit < 0:
+        period_profit = Decimal("0")
 
-        sales_growth = calculate_growth(
-            monthly_sales,
-            last_month_sales
-        )
+    if period_loss < 0:
+        period_loss = Decimal("0")
 
+    # =====================================================
+    # TODAY
+    # =====================================================
 
+    today_profit = (
+        today_income - today_expense
+    )
 
-        return JsonResponse({
+    today_loss = (
+        today_expense - today_income
+    )
 
-            "total_members": total_members,
-            "active_members": active_members,
-            "blocked_members": blocked_members,
-            "expired_members": expired_members,
-            "paused_members": paused_members,
+    if today_profit < 0:
+        today_profit = Decimal("0")
 
+    if today_loss < 0:
+        today_loss = Decimal("0")
 
-            "total_income": total_income,
-            "today_income": today_income,
-            "monthly_income": monthly_income,
+    # =====================================================
+    # MONTHLY
+    # =====================================================
 
+    monthly_profit = (
+        monthly_income - monthly_expense
+    )
 
-            "membership_income": membership_income,
-            "product_income": product_income,
-            "admission_income": admission_income,
+    monthly_loss = (
+        monthly_expense - monthly_income
+    )
 
+    if monthly_profit < 0:
+        monthly_profit = Decimal("0")
 
-            "total_expense": total_expense,
-            "today_expense": today_expense,
-            "monthly_expense": monthly_expense,
+    if monthly_loss < 0:
+        monthly_loss = Decimal("0")
 
+    # =====================================================
+    # ALL-TIME
+    # =====================================================
 
-            "today_profit": today_profit,
-            "total_profit": total_profit,
-            "monthly_profit": monthly_profit,
+    total_profit = (
+        total_income - total_expense
+    )
 
-            "total_sales": total_sales,
-            "today_sales": today_sales,
-            "monthly_sales": monthly_sales,
+    total_loss = (
+        total_expense - total_income
+    )
 
-            "sales_growth": sales_growth,
-            "today_loss": today_loss,
-            "total_loss": total_loss,
-            "monthly_loss": monthly_loss,
+    if total_profit < 0:
+        total_profit = Decimal("0")
 
+    if total_loss < 0:
+        total_loss = Decimal("0")
 
-            "revenue_growth": revenue_growth,
-            "expense_growth": expense_growth,
-            "profit_growth": profit_growth,
+    # =====================================================
+    # LAST MONTH PROFIT
+    # =====================================================
 
+    last_month_profit = (
+        last_month_income - last_month_expense
+    )
 
-            "pending_payments": pending_payments,
+    if last_month_profit < 0:
+        last_month_profit = Decimal("0")
 
-            "upcoming_expiries": len(upcoming_expiries_list),
-            "upcoming_expiries_list": upcoming_expiries_list,
+    # =====================================================
+    # GROWTH
+    # =====================================================
 
-            "recent_registrations": recent_registrations
-        })
+    revenue_growth = calculate_growth(
+        monthly_income,
+        last_month_income
+    )
 
+    expense_growth = calculate_growth(
+        monthly_expense,
+        last_month_expense
+    )
 
+    profit_growth = calculate_growth(
+        monthly_profit,
+        last_month_profit
+    )
 
-# from django.db.models import Sum
-# from django.http import JsonResponse
-# from django.views.decorators.csrf import csrf_exempt
-# from django.views.decorators.http import require_http_methods
-# from django.shortcuts import get_object_or_404
+    sales_growth = calculate_growth(
+        monthly_sales,
+        last_month_sales
+    )
 
-# @csrf_exempt
-# @require_http_methods(["POST"])
-# def add_payment(request, member_id):
+    # =====================================================
+    # RESPONSE
+    # =====================================================
 
-#     member = get_object_or_404(Member, id=member_id)
+    return JsonResponse({
 
-#     amount = request.POST.get("amount")
+        # =================================================
+        # PERIOD
+        # =================================================
 
-#     if not amount:
-#         return JsonResponse(
-#             {"error": "Amount is required"},
-#             status=400
-#         )
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
 
-#     Payment.objects.create(
-#         member=member,
-#         amount=amount,
-#         payment_date=request.POST.get("payment_date"),
-#         payment_method=request.POST.get("payment_method"),
-#         payment_type=request.POST.get("payment_type")
-#     )
+        # =================================================
+        # MEMBERS
+        # =================================================
 
-#     total_paid = (
-#         Payment.objects.filter(member=member)
-#         .aggregate(total=Sum("amount"))["total"] or 0
-#     )
+        "total_members": total_members,
+        "active_members": active_members,
+        "blocked_members": blocked_members,
+        "expired_members": expired_members,
+        "paused_members": paused_members,
+        "pending_payments": pending_payments,
 
-#     # Get plan object using the plan name stored in member.plan
-#     plan = get_object_or_404(Plan, name=member.plan)
+        # =================================================
+        # SELECTED PERIOD
+        # These are the values your KPI cards use
+        # =================================================
 
-#     member.paid_amount = total_paid
-#     member.due_amount = max(
-#         float(plan.price) - float(total_paid),
-#         0
-#     )
+        "total_sales": period_sales,
+        "total_expense": period_expense,
+        "total_income": period_income,
+        "total_profit": period_profit,
+        "period_loss": period_loss,
 
-#     member.save()
+        # =================================================
+        # TODAY
+        # =================================================
 
-#     return JsonResponse({
-#         "message": "Payment recorded successfully",
-#         "paid_amount": member.paid_amount,
-#         "due_amount": member.due_amount
-#     })
+        "today_income": today_income,
+        "today_expense": today_expense,
+        "today_sales": today_sales,
+        "today_profit": today_profit,
+        "today_loss": today_loss,
 
+        # =================================================
+        # MONTHLY
+        # =================================================
 
-# def get_single_payment(request, member_id):
-#     payments = Payment.objects.filter(member_id=member_id).values()
-#     return JsonResponse(list(payments),safe=False)
+        "monthly_income": monthly_income,
+        "monthly_expense": monthly_expense,
+        "monthly_sales": monthly_sales,
+        "monthly_profit": monthly_profit,
+        "monthly_loss": monthly_loss,
 
+        # =================================================
+        # YEARLY
+        # =================================================
+
+        "yearly_income": yearly_income,
+
+        # =================================================
+        # ALL TIME
+        # =================================================
+
+        "all_time_income": total_income,
+        "all_time_expense": total_expense,
+        "all_time_sales": total_sales,
+        "all_time_profit": total_profit,
+        "total_loss": total_loss,
+
+        # =================================================
+        # INCOME CATEGORIES
+        # =================================================
+
+        "membership_income": membership_income,
+        "product_income": product_income,
+        "admission_income": admission_income,
+
+        # =================================================
+        # GROWTH
+        # =================================================
+
+        "sales_growth": sales_growth,
+        "revenue_growth": revenue_growth,
+        "expense_growth": expense_growth,
+        "profit_growth": profit_growth,
+
+        # =================================================
+        # EXPIRIES
+        # =================================================
+
+        "upcoming_expiries": len(
+            upcoming_expiries_list
+        ),
+
+        "upcoming_expiries_list": (
+            upcoming_expiries_list
+        ),
+
+        # =================================================
+        # RECENT REGISTRATIONS
+        # =================================================
+
+        "recent_registrations": (
+            recent_registrations
+        ),
+    })
 
 def get_payments(request):
     data = []
@@ -1321,29 +1700,86 @@ def sell_product(request):
 
 @csrf_exempt
 def sales_list(request):
-    sales = Sales_product.objects.select_related("product", "member").all().order_by("-sold_at")
+
+    if request.method != "GET":
+        return JsonResponse(
+            {"error": "GET request only"},
+            status=405
+        )
+
+    period = request.GET.get(
+        "period",
+        "daily"
+    ).lower()
+
+    start_date, end_date = get_period_dates(period)
+
+    if start_date is None:
+        return JsonResponse(
+            {"error": "Invalid period"},
+            status=400
+        )
+
+    sales = (
+        Sales_product.objects
+        .select_related(
+            "product",
+            "member"
+        )
+        .filter(
+            sold_at__date__gte=start_date,
+            sold_at__date__lte=end_date
+        )
+        .order_by("-sold_at")
+    )
 
     data = []
 
     for sale in sales:
+
         data.append({
             "id": sale.id,
-            "member_id": sale.member.id if sale.member else None,
-            "member_name": sale.member.name if sale.member else None,
+
+            "member_id": (
+                sale.member.id
+                if sale.member
+                else None
+            ),
+
+            "member_name": (
+                sale.member.name
+                if sale.member
+                else None
+            ),
+
             "product": sale.product.name,
-            "category": sale.product.category,   # <-- Add this line
+
+            "category": sale.product.category,
+
             "quantity": sale.quantity,
+
             "payment_method": sale.payment_method,
-            "unit_price": float(sale.unit_price),
-            "total_amount": float(sale.total_amount),
-            "sold_at": sale.sold_at.strftime("%d-%m-%Y %H:%M"),
+
+            "unit_price": float(
+                sale.unit_price
+            ),
+
+            "total_amount": float(
+                sale.total_amount
+            ),
+
+            "sold_at": sale.sold_at.strftime(
+                "%d-%m-%Y %H:%M"
+            ),
         })
 
     return JsonResponse({
         "success": True,
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
         "sales": data
     })
-
 
 # def today_sales(request):
 #     today = timezone.now().date()
@@ -1694,184 +2130,81 @@ def pause_member(request, member_id):
         "is_paused": member.is_paused
     })
 
-# ..............................TRAINER 
 
-# @csrf_exempt
-# def create_trainer(request):
-#     if request.method == "POST":
-
-#         trainer = Trainer.objects.create(
-#             name=request.POST.get("name"),
-#             specialization=request.POST.get("specialization"),
-#             phone=request.POST.get("phone"),
-#             experience=request.POST.get("experience"),
-#             salary=request.POST.get("salary"),
-#             join_date=request.POST.get("join_date"),
-#             photo=request.FILES.get("photo")  
-#         )
-
-#         return JsonResponse({
-#             "id": trainer.id,
-#             "message": "Trainer created"
-#         })
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-# @csrf_exempt
-# def get_trainers(request):
-#     if request.method == "GET":
-#         trainers = list(Trainer.objects.order_by('id').values())
-#         return JsonResponse(trainers, safe=False)
-
-# @csrf_exempt
-# def get_single_trainer(request, trainer_id):
-#     if request.method == "GET":
-#         try:
-#             trainer = Trainer.objects.values().get(id=trainer_id)
-#             return JsonResponse(trainer, safe=False)
-#         except Trainer.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-
-# @csrf_exempt
-# def update_trainer(request, trainer_id):
-#     if request.method == "POST":
-
-#         try:
-#             trainer = Trainer.objects.get(id=trainer_id)
-
-#             trainer.name = request.POST.get("name")
-#             trainer.specialization = request.POST.get("specialization")
-#             trainer.phone = request.POST.get("phone")
-#             trainer.experience = request.POST.get("experience")
-#             trainer.salary = request.POST.get("salary")
-#             trainer.join_date = request.POST.get("join_date")
-
-          
-#             if request.FILES.get("photo"):
-#                 trainer.photo = request.FILES.get("photo")
-
-#             trainer.save()
-
-#             return JsonResponse({"message": "Trainer updated"})
-
-#         except Trainer.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-#     return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-
-# @csrf_exempt
-# def delete_trainer(request, trainer_id):
-#     if request.method == "DELETE":
-#         try:
-#             trainer = Trainer.objects.get(id=trainer_id)
-#             trainer.delete()
-
-#             return JsonResponse({"message": "Trainer deleted"})
-
-#         except Trainer.DoesNotExist:
-
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
-
-
-
-# @csrf_exempt
-# def get_single_trainer_payment(request,trainer_id):
-#     if request.method == "GET":
-#         try:
-#             trainer=TrainerPayment.objects.values().get(id=trainer_id)
-#             return JsonResponse(trainer,safe=False)
-#         except TrainerPayment.DoesNotExist:
-#             return JsonResponse({"error": "Trainer not found"},status=404)
-
+from datetime import date
+import json
 
 
 @csrf_exempt
 def add_member_payment(request, member_id):
-    if request.method == "POST":
 
-        data = json.loads(request.body)
-
-        print("member_id =", member_id)
-
-        member = Member.objects.get(id=member_id)
-
-
-        amount = float(data.get("amount", 0))
-
-
-        # Amount must be positive
-        if amount <= 0:
-            return JsonResponse(
-                {"error": "Amount must be greater than 0"},
-                status=400
-            )
-
-
-        # Already fully paid
-        if float(member.due_amount) <= 0:
-            return JsonResponse(
-                {"error": "Membership fee already fully paid"},
-                status=400
-            )
-
-
-        # Prevent overpayment
-        if amount > float(member.due_amount):
-            return JsonResponse(
-                {"error": f"Amount cannot exceed due amount ₹{member.due_amount}"},
-                status=400
-            )
-
-
-        # Save money directly into Income model
-        Income.objects.create(
-            member=member,   # important
-            title="Membership",
-            name=member.name,
-            phone=member.phone,
-            category="membership",
-            amount=amount,
-            payment_method=data.get("payment_method"),
-            date=data.get("payment_date"),
-            description=f"Membership payment received from {member.name}",
-            is_system_generated=True
+    if request.method != "POST":
+        return JsonResponse(
+            {"error": "Invalid request method"},
+            status=405
         )
 
+    data = json.loads(request.body)
 
-        member.paid_amount += amount
-        member.due_amount -= amount
+    try:
+        member = Member.objects.get(id=member_id)
+    except Member.DoesNotExist:
+        return JsonResponse(
+            {"error": "Member not found"},
+            status=404
+        )
 
+    amount = float(data.get("amount", 0))
 
-        if member.due_amount < 0:
-            member.due_amount = 0
+    if amount <= 0:
+        return JsonResponse(
+            {"error": "Amount must be greater than 0"},
+            status=400
+        )
 
+    if float(member.due_amount) <= 0:
+        return JsonResponse(
+            {"error": "Membership fee already fully paid"},
+            status=400
+        )
 
-        member.save()
+    if amount > float(member.due_amount):
+        return JsonResponse(
+            {
+                "error": f"Amount cannot exceed due amount ₹{member.due_amount}"
+            },
+            status=400
+        )
 
-
-        return JsonResponse({
-            "message": "Member payment recorded",
-            "paid_amount": member.paid_amount,
-            "due_amount": member.due_amount,
-            "payment_completed": member.due_amount == 0
-        })
-
-
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=405
+    # Income date is automatically set by auto_now_add=True
+    Income.objects.create(
+        member=member,
+        title="Membership",
+        name=member.name,
+        phone=member.phone,
+        category="membership",
+        amount=amount,
+        payment_method=data.get("payment_method", "cash"),
+        description=f"Membership payment received from {member.name}",
+        is_system_generated=True
     )
 
+    member.paid_amount += amount
+    member.due_amount -= amount
 
-import json
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import Staffs, Payment, Expense
+    if member.due_amount < 0:
+        member.due_amount = 0
+
+    member.save()
+
+    return JsonResponse({
+        "message": "Member payment recorded",
+        "paid_amount": member.paid_amount,
+        "due_amount": member.due_amount,
+        "payment_completed": member.due_amount == 0
+    })
+
+
 
 
 @csrf_exempt
@@ -2158,6 +2491,7 @@ def add_income(request):
         status=201
     )
 
+
 @csrf_exempt
 def incomes(request):
 
@@ -2167,13 +2501,18 @@ def incomes(request):
             status=405
         )
 
-    incomes = Income.objects.all().order_by("-date", "-id")
-
     data = []
 
+    # =========================
+    # NORMAL INCOME
+    # =========================
+
+    incomes = Income.objects.all().order_by("-date", "-id")
+
     for income in incomes:
+
         data.append({
-            "id": income.id,
+            "id": f"in_{income.id}",
             "title": income.title,
             "name": income.name,
             "phone": income.phone,
@@ -2182,32 +2521,152 @@ def incomes(request):
             "amount": str(income.amount),
             "payment_method": income.payment_method,
             "date": income.date.strftime("%Y-%m-%d"),
-            "type": "Membership" if income.is_system_generated else "Additional"
+            "type": (
+                "Membership"
+                if income.is_system_generated
+                else "Additional"
+            ),
+
+            "_sort_date": income.date,
         })
 
-    return JsonResponse(data,safe=False)
+    # =========================
+    # PRODUCT SALES
+    # =========================
+
+    sales = Sales_product.objects.select_related(
+        "member",
+        "product"
+    ).order_by("-sold_at", "-id")
+
+    for sale in sales:
+
+        data.append({
+            "id": f"sa_{sale.id}",
+            "title": "Product Sale",
+            "name": sale.product.name,
+
+            # Member phone number
+            "phone": sale.member.phone if sale.member else "",
+
+            "category": "Product",
+            "description": f"{sale.product.name} × {sale.quantity}",
+            "amount": str(sale.total_amount),
+            "payment_method": sale.payment_method,
+            "date": sale.sold_at.strftime("%Y-%m-%d"),
+            "type": "Product Sale",
+
+            "_sort_date": sale.sold_at,
+        })
+
+    # =========================
+    # SORT NEWEST FIRST
+    # =========================
+
+    data.sort(
+        key=lambda x: x["_sort_date"],
+        reverse=True
+    )
+
+    # Remove internal sorting field
+    for item in data:
+        item.pop("_sort_date", None)
+
+    return JsonResponse(data, safe=False)
+
+
+
+def get_period_dates(period):
+    today = date.today()
+
+    if period == "daily":
+        start_date = today
+        end_date = today
+
+    elif period == "weekly":
+        start_date = today - timedelta(days=today.weekday())
+        end_date = today
+
+    elif period == "monthly":
+        start_date = today.replace(day=1)
+        end_date = today
+
+    elif period == "yearly":
+        start_date = today.replace(month=1, day=1)
+        end_date = today
+
+    else:
+        return None, None
+
+    return start_date, end_date
 
 
 @csrf_exempt
 def income_by_members(request):
 
-    basic_income = Income.objects.filter(
+    if request.method != "GET":
+        return JsonResponse(
+            {"error": "GET request only"},
+            status=405
+        )
+
+    period = request.GET.get(
+        "period",
+        "daily"
+    ).lower()
+
+    start_date, end_date = get_period_dates(period)
+
+    if start_date is None:
+        return JsonResponse(
+            {"error": "Invalid period"},
+            status=400
+        )
+
+    # ================================
+    # BASE FILTER
+    # ================================
+
+    base_income = Income.objects.filter(
+        date__date__gte=start_date,
+        date__date__lte=end_date
+    )
+
+    # ================================
+    # BASIC
+    # Silver + Gold
+    # ================================
+
+    basic_income = base_income.filter(
         category="membership",
-        member__plan__in=["Silver", "Gold"]
+        member__plan__in=[
+            "Silver",
+            "Gold"
+        ]
     ).aggregate(
         total=Sum("amount")
     )["total"] or 0
 
+    # ================================
+    # PREMIUM
+    # Premium + Platinum
+    # ================================
 
-    premium_income = Income.objects.filter(
+    premium_income = base_income.filter(
         category="membership",
-        member__plan__in=["Premium", "Platinum"]
+        member__plan__in=[
+            "Premium",
+            "Platinum"
+        ]
     ).aggregate(
         total=Sum("amount")
     )["total"] or 0
 
+    # ================================
+    # OTHER
+    # ================================
 
-    other_income = Income.objects.filter(
+    other_income = base_income.filter(
         category__in=[
             "registration",
             "product_sale",
@@ -2217,25 +2676,27 @@ def income_by_members(request):
         total=Sum("amount")
     )["total"] or 0
 
-
     return JsonResponse({
         "success": True,
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
+
         "income": [
             {
-                "name": "Basic Membership",
+                "name": "Basic",
                 "amount": float(basic_income)
             },
             {
-                "name": "Premium Membership",
+                "name": "Premium",
                 "amount": float(premium_income)
             },
             {
-                "name": "Other Income",
+                "name": "Other",
                 "amount": float(other_income)
             }
         ]
     })
-
 
 @csrf_exempt
 def expense_by_category(request):
@@ -2246,10 +2707,29 @@ def expense_by_category(request):
             status=405
         )
 
+    period = request.GET.get(
+        "period",
+        "daily"
+    ).lower()
+
+    start_date, end_date = get_period_dates(period)
+
+    if start_date is None:
+        return JsonResponse(
+            {"error": "Invalid period"},
+            status=400
+        )
+
     expenses = (
         Expense.objects
+        .filter(
+            date__gte=start_date,
+            date__lte=end_date
+        )
         .values("category")
-        .annotate(total=Sum("amount"))
+        .annotate(
+            total=Sum("amount")
+        )
         .order_by("-total")
     )
 
@@ -2258,10 +2738,15 @@ def expense_by_category(request):
     for expense in expenses:
         data.append({
             "category": expense["category"],
-            "amount": float(expense["total"] or 0)
+            "amount": float(
+                expense["total"] or 0
+            )
         })
 
     return JsonResponse({
         "success": True,
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
         "expenses": data
     })
