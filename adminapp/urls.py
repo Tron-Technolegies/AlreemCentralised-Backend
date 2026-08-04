@@ -74,12 +74,12 @@ urlpatterns = [
     path("all_incomes/",views.incomes),
     path("income_by_members/",views.income_by_members),
 
-    path("expense_by_category/",views.expense_by_category),
+    path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
+    path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
 
-    path(
-    "profit_loss_report/",
-    views.profit_loss_report,
-    name="profit_loss_report"
-),
-
-] 
+        path(
+            "generate-diet/",
+            views.generate_diet,
+            name="generate-diet",
+        ),
+]
