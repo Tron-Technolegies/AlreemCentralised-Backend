@@ -26,7 +26,39 @@ class Member(models.Model):
     is_paused = models.BooleanField(default=False)
     pause_start_date = models.DateField(blank=True, null=True)
     used_pause_days = models.PositiveIntegerField(default=0)
+    pause_expiry_date = models.DateField(
+        blank=True,
+        null=True
+    )
 
+class MemberPause(models.Model):
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name="pause_history"
+    )
+
+    start_date = models.DateField()
+
+    end_date = models.DateField(
+        null=True,
+        blank=True
+    )
+
+    allowed_days = models.PositiveIntegerField(default=0)
+
+    paused_days = models.PositiveIntegerField(default=0)
+
+    # remove these two fields from here
+    # expiry_date
+    # pause_expiry_date
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.member.name} - {self.start_date}"
+
+    
 
 class Plan(models.Model):
     name = models.CharField(max_length=100)
