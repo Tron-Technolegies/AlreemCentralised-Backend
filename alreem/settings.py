@@ -30,7 +30,8 @@ SECRET_KEY = 'django-insecure-5nvvk#cf&l(2f)v583u6vl&a5)6$#q81n#(f*r#%e#64@!luo#
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['alreemcentralised-backend.onrender.com']
+# ALLOWED_HOSTS = ['alreemcentralised-backend.onrender.com']
+ALLOWED_HOSTS=[]
 
 
 # Application definition
@@ -113,6 +114,14 @@ DATABASES = {
         'PASSWORD':os.getenv('PASSWORD'),
     }
 }
+
+# import dj_database_url
+
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         default=os.environ.get("DATABASE_URL")
+#     )
+# }
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 

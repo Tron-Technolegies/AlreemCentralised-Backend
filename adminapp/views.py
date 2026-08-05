@@ -3599,35 +3599,43 @@ def profit_loss_report(request):
 
 
 
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from django.conf import settings
 from groq import Groq
 
+from .models import Member
 
-from groq import Groq
-from django.conf import settings
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
+import json
 
 
 @api_view(["POST"])
 def generate_diet(request):
 
-    data = request.data
+    member_id = request.data.get("member_id")
 
-    age = data.get("age")
-    gender = data.get("gender")
-    height = data.get("height")
-    weight = data.get("weight")
-    goal = data.get("goal")
-    food = data.get("food_preference")
+    if not member_id:
+        return Response(
+            {
+                "success": False,
+                "error": "member_id is required."
+            },
+            status=400
+        )
 
-    client = Groq(
-        api_key=settings.GROQ_API_KEY
-    )
+    member = get_object_or_404(Member, id=member_id)
+
+    age = member.age
+    gender = member.gender
+    height = member.height
+    weight = member.weight
+    # goal = member.goal
+    # food = member.food_preference
+
+    client = Groq(api_key=settings.GROQ_API_KEY)
 
     prompt = f"""
 You are an expert sports nutritionist.
@@ -3640,8 +3648,6 @@ Age: {age}
 Gender: {gender}
 Height: {height} cm
 Weight: {weight} kg
-Goal: {goal}
-Food Preference: {food}
 
 Return ONLY valid JSON.
 
@@ -3657,8 +3663,8 @@ Return exactly in this format:
     "gender": "{gender}",
     "height": {height},
     "weight": {weight},
-    "goal": "{goal}",
-    "food_preference": "{food}"
+
+  
   }},
   "nutrition": {{
     "daily_calories": "",
@@ -3729,11 +3735,11 @@ Return exactly in this format:
 
     ai_response = chat.choices[0].message.content
 
-    import json
-
     try:
         diet_json = json.loads(ai_response)
+
     except json.JSONDecodeError:
+
         return Response(
             {
                 "success": False,
@@ -3743,7 +3749,9 @@ Return exactly in this format:
             status=500
         )
 
-    return Response({
-        "success": True,
-        "diet_plan": diet_json
-    })
+    return Response(
+        {
+            "success": True,
+            "diet_plan": diet_json
+        }
+    )
