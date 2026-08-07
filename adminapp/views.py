@@ -3600,25 +3600,16 @@ def profit_loss_report(request):
 
 
 from django.conf import settings
-from django.shortcuts import get_object_or_404
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-
 from groq import Groq
-
-from .models import Member
-
-import json
-
 
 @api_view(["POST"])
 def generate_diet(request):
-
+    print("USER:", request.user)
+    print("AUTH:", request.auth)
     member_id = request.data.get("member_id")
 
     if not member_id:
-        return Response(
+        return JsonResponse(
             {
                 "success": False,
                 "error": "member_id is required."
@@ -3740,7 +3731,7 @@ Return exactly in this format:
 
     except json.JSONDecodeError:
 
-        return Response(
+        return JsonResponse(
             {
                 "success": False,
                 "error": "AI returned invalid JSON.",
@@ -3749,9 +3740,364 @@ Return exactly in this format:
             status=500
         )
 
-    return Response(
+    return JsonResponse(
         {
             "success": True,
             "diet_plan": diet_json
         }
     )
+
+
+# .....................helper 
+
+import json
+import requests
+
+from django.conf import settings
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+
+from rest_framework.decorators import api_view
+
+from groq import Groq
+
+from .models import Member
+
+
+EXERCISE_API_URL = "https://exercisedb.p.rapidapi.com/exercises/name/"
+
+def build_gif_url(exercise_id, resolution="360"):
+    if not exercise_id:
+        return None
+    return (
+        f"https://exercisedb.p.rapidapi.com/image"
+        f"?exerciseId={exercise_id}"
+        f"&resolution={resolution}"
+        f"&rapidapi-key={settings.EXERCISE_API_KEY}"
+    )
+
+def search_exercise(exercise_name):
+    """
+    Search ExerciseDB and return the first matching exercise.
+    """
+
+    try:
+        response = requests.get(
+            f"{EXERCISE_API_URL}{exercise_name}",
+            headers={
+                "X-RapidAPI-Key": settings.EXERCISE_API_KEY,
+                "X-RapidAPI-Host": "exercisedb.p.rapidapi.com",
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+
+        if not isinstance(data, list) or len(data) == 0:
+            return None
+
+        exercise = data[0]
+
+        return {
+            "id": exercise.get("id"),
+            "name": exercise.get("name"),
+            "gifUrl": build_gif_url(exercise.get("id")),
+            "bodyPart": exercise.get("bodyPart"),
+            "target": exercise.get("target"),
+            "equipment": exercise.get("equipment"),
+            "secondaryMuscles": exercise.get("secondaryMuscles", []),
+            "instructions": exercise.get("instructions", []),
+        }
+
+    except Exception as e:
+        print("ExerciseDB Error:", e)
+        return None
+
+import re
+
+
+
+
+
+@api_view(["POST"])
+def generate_workout(request):
+
+    member_id = request.data.get("member_id")
+
+    if not member_id:
+        return JsonResponse(
+            {"success": False, "error": "member_id is required."},
+            status=400
+        )
+
+    member = get_object_or_404(Member, id=member_id)
+
+    age = member.age
+    gender = member.gender
+    height = float(member.height)
+    weight = float(member.weight)
+
+    if height <= 0 or weight <= 0:
+        return JsonResponse(
+            {"success": False, "error": "Invalid height or weight for this member."},
+            status=400
+        )
+
+    bmi = round(weight / ((height / 100) ** 2), 1)
+
+    if bmi < 18.5:
+        bmi_status = "Underweight"
+    elif bmi < 25:
+        bmi_status = "Normal"
+    elif bmi < 30:
+        bmi_status = "Overweight"
+    else:
+        bmi_status = "Obese"
+
+    client = Groq(api_key=settings.GROQ_API_KEY)
+
+    prompt = f"""
+You are a certified strength and conditioning coach.
+
+Create a personalized 6-day workout plan based on the member's BMI.
+
+Member Details
+
+Age: {age}
+Gender: {gender}
+Height: {height} cm
+Weight: {weight} kg
+BMI: {bmi}
+BMI Category: {bmi_status}
+
+Rules:
+
+1. Workout MUST match BMI.
+2. Underweight → muscle gain.
+3. Normal → balanced hypertrophy.
+4. Overweight → fat loss + cardio.
+5. Obese → beginner friendly + low impact.
+
+Generate:
+
+Day 1 - Legs
+Day 2 - Chest & Triceps
+Day 3 - Back & Biceps
+Day 4 - Shoulders
+Day 5 - Cardio & Core
+Day 6 - Full Body
+
+Each day should contain 5-7 exercises.
+
+VERY IMPORTANT:
+
+Use REAL ExerciseDB exercise names only.
+
+Examples:
+
+barbell squat
+leg press
+walking on treadmill
+bench press
+push up
+lat pulldown
+seated cable row
+dumbbell shoulder press
+plank
+crunch
+mountain climber
+burpee
+romanian deadlift
+leg extension
+leg curl
+pec deck fly
+cable crossover
+tricep pushdown
+barbell curl
+hammer curl
+deadlift
+lunges
+hip thrust
+jump rope
+
+Return ONLY VALID JSON.
+
+Do not return markdown.
+
+Do not return explanations.
+
+Return exactly this structure:
+
+{{
+    "member": {{
+        "age": {age},
+        "gender": "{gender}",
+        "height": {height},
+        "weight": {weight},
+        "bmi": {bmi},
+        "category": "{bmi_status}"
+    }},
+    "weekly_plan": [
+        {{
+            "day": "Day 1",
+            "title": "Legs",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": [
+                {{
+                    "name": "",
+                    "description": "",
+                    "sets": "",
+                    "reps": "",
+                    "rest": ""
+                }}
+            ]
+        }},
+        {{
+            "day": "Day 2",
+            "title": "Chest & Triceps",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": []
+        }},
+        {{
+            "day": "Day 3",
+            "title": "Back & Biceps",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": []
+        }},
+        {{
+            "day": "Day 4",
+            "title": "Shoulders",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": []
+        }},
+        {{
+            "day": "Day 5",
+            "title": "Cardio & Core",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": []
+        }},
+        {{
+            "day": "Day 6",
+            "title": "Full Body",
+            "duration": "",
+            "intensity": "",
+            "focus": "",
+            "exercises": []
+        }}
+    ]
+}}
+"""
+
+    try:
+        chat = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are an expert certified gym trainer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+        )
+        ai_response = chat.choices[0].message.content
+    except Exception as e:
+        return JsonResponse(
+            {"success": False, "error": f"AI request failed: {str(e)}"},
+            status=502
+        )
+
+    # Strip markdown fences in case the model ignores the "no markdown" instruction
+    cleaned_response = ai_response.strip()
+    cleaned_response = re.sub(r"^```(?:json)?|```$", "", cleaned_response, flags=re.MULTILINE).strip()
+
+    try:
+        workout_json = json.loads(cleaned_response)
+
+        # ----------------------------------------
+        # Enrich workout with ExerciseDB data
+        # ----------------------------------------
+        for day in workout_json.get("weekly_plan", []):
+
+            for exercise in day.get("exercises", []):
+
+                exercise_name = exercise.get("name", "").strip()
+
+                if not exercise_name:
+                    continue
+
+                exercise_data = search_exercise(exercise_name)
+
+                if exercise_data:
+                    exercise["exercise_id"] = exercise_data["id"]
+                    exercise["gifUrl"] = exercise_data["gifUrl"]
+                    exercise["bodyPart"] = exercise_data["bodyPart"]
+                    exercise["target"] = exercise_data["target"]
+                    exercise["equipment"] = exercise_data["equipment"]
+                    exercise["secondaryMuscles"] = exercise_data["secondaryMuscles"]
+                    exercise["instructions"] = exercise_data["instructions"]
+                else:
+                    exercise["exercise_id"] = None
+                    exercise["gifUrl"] = None
+                    exercise["bodyPart"] = ""
+                    exercise["target"] = ""
+                    exercise["equipment"] = ""
+                    exercise["secondaryMuscles"] = []
+                    exercise["instructions"] = []
+
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {
+                "success": False,
+                "error": "AI returned invalid JSON.",
+                "raw_response": ai_response
+            },
+            status=500
+        )
+
+    return JsonResponse(
+        {"success": True, "workout_plan": workout_json}
+    )
+
+    # Part 3 starts here...
+    
+# from rest_framework.decorators import api_view
+# from rest_framework.response import Response
+# from .models import DietPlanPDF
+# from .serializers import DietPlanPDFSerializer
+
+
+# @api_view(["POST"])
+# def upload_diet_pdf(request):
+
+#     serializer = DietPlanPDFSerializer(
+#         data=request.data,
+#         context={
+#             "request": request
+#         }
+#     )
+
+#     if serializer.is_valid():
+
+#         serializer.save()
+
+#         return Response({
+#             "success": True,
+#             "pdf_url": serializer.data["pdf"]
+#         })
+
+
+#     return Response(
+#         serializer.errors,
+#         status=400
+#     )

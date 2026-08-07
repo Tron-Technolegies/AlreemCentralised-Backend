@@ -265,7 +265,20 @@ class Enquiry(models.Model):
     date = models.CharField(max_length=50, blank=True, null=True)
 
     
+class DietPlanPDF(models.Model):
 
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE
+    )
+
+    pdf = models.FileField(
+        upload_to="diet_plans/"
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
 
 
 

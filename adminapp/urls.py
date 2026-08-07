@@ -77,5 +77,17 @@ urlpatterns = [
     path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
     path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
 
-    path("generate-diet/",views.generate_diet,name="generate-diet",),
+    path("generate-diet/",views.generate_diet,name="generate-diet"),
+    path("generate-workout/",views.generate_workout,name="generate_workout-diet"),
+
+#     path(
+#         "exercise-search/",
+#         views.exercise_search
+#     ),
+#     path(
+#     "exercise/<str:exercise_id>/",
+#     views.exercise_detail
+# ),
+    # path("upload-diet-pdf/",views.upload_diet_pdf),
+
 ]

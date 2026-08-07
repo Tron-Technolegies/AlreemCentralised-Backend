@@ -30,7 +30,8 @@ SECRET_KEY = 'django-insecure-5nvvk#cf&l(2f)v583u6vl&a5)6$#q81n#(f*r#%e#64@!luo#
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['alreemcentralised-backend.onrender.com']
+# ALLOWED_HOSTS = ['alreemcentralised-backend.onrender.com']
+ALLOWED_HOSTS = []
 
 
 # Application definition
@@ -103,16 +104,31 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.getenv('NAME'),
+#         'HOST': os.getenv('HOST'),
+#         'PORT': os.getenv('DB_PORT'),
+#         'USER': os.getenv('USER'),
+#         'PASSWORD':os.getenv('PASSWORD'),
+#     }
+# }
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('NAME'),
-        'HOST': os.getenv('HOST'),
+        'NAME': os.getenv('DB_NAME'),
+        'HOST': os.getenv('DB_HOST'),
         'PORT': os.getenv('DB_PORT'),
-        'USER': os.getenv('USER'),
-        'PASSWORD':os.getenv('PASSWORD'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
     }
 }
+
+EXERCISE_API_KEY = os.getenv(
+    "EXERCISE_API_KEY"
+)
 
 # import dj_database_url
 
