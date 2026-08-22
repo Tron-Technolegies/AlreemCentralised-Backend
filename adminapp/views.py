@@ -1,14 +1,178 @@
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Enquiry, Expense, Payment, Product, Sales_product, Member,Expense,Income,MemberPause
+from .models import Branch, Enquiry, Expense, GymEquipment, Payment, Product, Sales_product, Member,Expense,Income,MemberPause
 import json
 from datetime import datetime
 from django.utils import timezone
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated , BasePermission
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 
+import csv
+import io
+import uuid
+import re
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.response import Response
+from rest_framework import status
+
+from .models import Member, Staffs
+
+IMPORT_CONFIG = {
+    "member": {
+        "model": Member,
+        "mapping": {
+            "first_name": "name",
+            "phone": "phone",
+            "email": "email",
+            "plan": "plan",
+            "age": "age",
+        },
+    },
+
+    "staff": {
+        "model": Staffs,
+        "mapping": {
+            "first_name": "name",
+            "number": "phone",
+            "salary": "salary",
+            "joindate": "joining_date",
+        },
+    },
+}
+
+
+@api_view(["POST"])
+# @permission_classes([IsAuthenticated])
+def import_csv(request):
+
+    csv_file = request.FILES.get("file")
+    model_type = request.data.get("model")
+
+    if not csv_file:
+        return Response(
+            {
+                "success": False,
+                "error": "CSV file is required."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if not model_type:
+        return Response(
+            {
+                "success": False,
+                "error": "model is required."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    config = IMPORT_CONFIG.get(model_type)
+
+    if not config:
+        return Response(
+            {
+                "success": False,
+                "error": f"Unsupported model: {model_type}"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    try:
+
+        decoded_file = csv_file.read().decode("utf-8-sig")
+
+        reader = csv.DictReader(
+            io.StringIO(decoded_file)
+        )
+
+        Model = config["model"]
+        mapping = config["mapping"]
+
+        imported = []
+        skipped = []
+
+        for row_number, row in enumerate(reader, start=2):
+
+            try:
+
+                data = {}
+
+                # CSV → Django field mapping
+                for csv_field, model_field in mapping.items():
+
+                    value = row.get(csv_field, "")
+
+                    if value is not None:
+                        value = value.strip()
+
+                    if value != "":
+                        data[model_field] = value
+
+                # ==========================
+                # MEMBER SPECIAL HANDLING
+                # ==========================
+
+                if model_type == "member":
+
+                    # Member requires primary key
+                    data["id"] = str(uuid.uuid4())
+
+                    # Convert age to integer
+                    if "age" in data:
+                        data["age"] = int(data["age"])
+
+                # ==========================
+                # STAFF SPECIAL HANDLING
+                # ==========================
+
+                if model_type == "staff":
+
+                    # Convert salary to number
+                    if "salary" in data:
+                        data["salary"] = float(data["salary"])
+
+                # Create database object
+                obj = Model.objects.create(**data)
+
+                imported.append({
+                    "row": row_number,
+                    "id": obj.id,
+                })
+
+            except Exception as e:
+
+                skipped.append({
+                    "row": row_number,
+                    "error": str(e),
+                })
+
+        return Response({
+            "success": True,
+            "model": model_type,
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "imported": imported,
+            "skipped": skipped,
+        })
+
+    except Exception as e:
+
+        return Response(
+            {
+                "success": False,
+                "error": str(e)
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+class IsSuperAdmin(BasePermission):
+    def has_permission(self, request, view):
+        return (
+            request.user.is_authenticated
+            and request.user.is_superuser
+        )   
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -83,7 +247,6 @@ def admin_profile_view(request):
             "is_superuser": user.is_superuser,
         }
     )
-
 
 #.......................... MEMBERS
 
@@ -238,6 +401,7 @@ def create_member(request):
         })
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
+    
     
     
 
@@ -671,8 +835,8 @@ def update_member(request, member_id):
         "expiry_date":member.expiry_date
     })
 
-
-@csrf_exempt
+@api_view(['DELETE'])
+@permission_classes([IsSuperAdmin])
 def delete_member(request, member_id):
     if request.method == "DELETE":
         try:
@@ -735,7 +899,8 @@ def update_plan(request, plan_id):
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
 
-@csrf_exempt
+@api_view(['DELETE'])
+@permission_classes([IsSuperAdmin])
 def delete_plan(request, plan_id):
     if request.method == "DELETE":
         try:
@@ -753,17 +918,30 @@ def delete_plan(request, plan_id):
 def create_branch(request):
     if request.method == "POST":
 
+        phone = request.POST.get("phone")
+        capacity = request.POST.get("capacity")
+
+        # Validate phone number
+        if not phone or not phone.isdigit() or len(phone) != 10:
+            return JsonResponse(
+                {"error": "Enter a valid 10-digit mobile number"},
+                status=400
+            )
+
         branch = Branch.objects.create(
             name=request.POST.get("name"),
             location=request.POST.get("location"),
             manager_name=request.POST.get("manager_name"),
-            phone=request.POST.get("phone"),
-            capacity=request.POST.get("capacity")
+            phone=phone,
+            capacity=capacity
         )
 
         return JsonResponse({"message": "success"})
 
-
+    return JsonResponse(
+        {"error": "Only POST method is allowed"},
+        status=405
+    )
 @csrf_exempt
 def get_branches(request):
     if request.method == "GET":
@@ -825,8 +1003,8 @@ def update_branch(request, branch_id):
         return JsonResponse({"message": "Branch updated successfully"})
 
 
-
-@csrf_exempt
+@api_view(['DELETE'])
+@permission_classes([IsSuperAdmin])
 def delete_branch(request, branch_id):
     if request.method == "DELETE":
         try:
@@ -2112,8 +2290,8 @@ def update_product(request, product_id):
 
 
 # DELETE
-
-@csrf_exempt
+@api_view(['DELETE'])
+@permission_classes([IsSuperAdmin])
 def delete_product(request, product_id):
     if request.method != "DELETE":
         return JsonResponse(
@@ -2337,6 +2515,12 @@ def create_staff(request):
         salary = request.POST.get("salary", 0)
         status = request.POST.get("status", "Active")
 
+        if not (phone.isdigit() and len(phone) == 10):
+            return JsonResponse(
+                {"error": "Enter a valid 10-digit mobile number"},
+                status=400
+            )
+
         staff = Staffs.objects.create(
             # id=request.POST.get("id"),
             name=request.POST.get("name"),
@@ -2366,19 +2550,20 @@ from django.views.decorators.csrf import csrf_exempt
 from django.db.models import Sum
 from .models import Staffs, Payment
 
-
 @csrf_exempt
 def get_staffs(request):
     staffs = Staffs.objects.order_by("-id")
     data = []
 
     for staff in staffs:
-        paid_amount = Payment.objects.filter(
-            staff=staff,
-            payment_type="Salary"
-        ).aggregate(total=Sum("amount"))["total"] or 0
 
-        due_amount = max(float(staff.salary) - float(paid_amount), 0)
+        # Total amount paid to staff
+        # Includes Salary, Incentive, Bonus, Commission, Advance, Overtime, etc.
+        paid_amount = Payment.objects.filter(
+            staff=staff
+        ).aggregate(
+            total=Sum("amount")
+        )["total"] or 0
 
         data.append({
             "id": staff.id,
@@ -2390,12 +2575,10 @@ def get_staffs(request):
             "joining_date": staff.joining_date,
             "salary": str(staff.salary),
             "paid_amount": str(paid_amount),
-            # "due_amount": str(due_amount),
             "status": staff.status,
         })
 
     return JsonResponse(data, safe=False)
-
 
 @csrf_exempt
 def get_staff(request, staff_id):
@@ -2454,18 +2637,23 @@ def update_staff(request, id):
 
     return JsonResponse({"success": False}, status=400)
 
-@csrf_exempt
+@api_view(["DELETE"])
+@permission_classes([IsSuperAdmin])
 def delete_staff(request, staff_id):
-    if request.method == "DELETE":
-        try:
-            staff = Staffs.objects.get(id=staff_id)
-            staff.delete()
+    try:
+        staff = Staffs.objects.get(id=staff_id)
+        staff.delete()
 
-            return JsonResponse({"message": "Staff deleted successfully"})
+        return Response(
+            {"message": "Staff deleted successfully"},
+            status=status.HTTP_200_OK
+        )
 
-        except Staffs.DoesNotExist:
-            return JsonResponse({"error": "Staff not found"},status=404)
-
+    except Staffs.DoesNotExist:
+        return Response(
+            {"error": "Staff not found"},
+            status=status.HTTP_404_NOT_FOUND
+        )
 
 @csrf_exempt
 def pause_member(request, member_id):
@@ -2886,97 +3074,68 @@ def add_member_payment(request, member_id):
 @csrf_exempt
 def add_staff_payment(request, staff_id):
     if request.method != "POST":
-        return JsonResponse({"error": "Invalid request method"}, status=405)
+        return JsonResponse(
+            {"error": "Invalid request method"},
+            status=405
+        )
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON data"}, status=400)
+        return JsonResponse(
+            {"error": "Invalid JSON data"},
+            status=400
+        )
 
     try:
         staff = Staffs.objects.get(id=staff_id)
     except Staffs.DoesNotExist:
-        return JsonResponse({"error": "Staff not found"}, status=404)
+        return JsonResponse(
+            {"error": "Staff not found"},
+            status=404
+        )
 
     amount = float(data.get("amount", 0))
     payment_date = data.get("payment_date")
     payment_method = data.get("payment_method")
+    payment_type = data.get("payment_type", "Salary")
+    description = data.get("description", "")
 
     if amount <= 0:
-        return JsonResponse({"error": "Amount must be greater than 0"}, status=400)
+        return JsonResponse(
+            {"error": "Amount must be greater than 0"},
+            status=400
+        )
 
-    # 1) Save in Payment table -> for Transactions page
+    # Save payment
     payment = Payment.objects.create(
         staff=staff,
         amount=amount,
-        payment_type="Salary",
+        payment_type=payment_type,
         payment_method=payment_method,
         payment_date=payment_date,
     )
 
-    # 2) Save in Expense table -> for expense/profit calculation
-
+    # Save expense
     Expense.objects.create(
-    title="Salary",
-    name=staff.name,
-    phone=staff.phone,
-    category="salary",
-    amount=amount,
-    payment_method=payment_method,
-    date=payment_date,
-    description=f"Salary paid to {staff.name}",
-    is_system_generated=True
-)
+        title=payment_type,
+        name=staff.name,
+        phone=staff.phone,
+        category="salary",
+        amount=amount,
+        payment_method=payment_method,
+        date=payment_date,
+        description=description or f"{payment_type} paid to {staff.name}",
+        is_system_generated=True
+    )
 
     return JsonResponse({
         "message": "Staff payment recorded successfully",
         "payment_id": payment.id,
         "staff_name": staff.name,
-        "amount": str(payment.amount)
+        "amount": str(payment.amount),
+        "payment_type": payment_type,
     }, status=201)
-
-
-# from django.http import JsonResponse
-# from django.views.decorators.csrf import csrf_exempt
-# from .models import Payment
-
-
-# @csrf_exempt
-# def transactions(request):
-#     payments = Payment.objects.select_related("member", "staff").order_by("-payment_date", "-id")
-
-#     data = []
-
-#     for payment in payments:
-#         if payment.member:
-#             data.append({
-#                 "id": payment.id,
-#                 "transaction_for": "Member",
-#                 "person_id": payment.member.id,
-#                 "name": payment.member.name,
-#                 "phone": payment.member.phone,
-#                 "amount": payment.amount,
-#                 "payment_type": payment.payment_type,
-#                 "payment_method": payment.payment_method,
-#                 "payment_date": payment.payment_date,
-#             })
-
-#         elif payment.staff:
-#             data.append({
-#                 "id": payment.id,
-#                 "transaction_for": "Staff",
-#                 "person_id": payment.staff.id,
-#                 "name": payment.staff.name,
-#                 "phone": payment.staff.phone,
-#                 "amount": payment.amount,
-#                 "payment_type": payment.payment_type,
-#                 "payment_method": payment.payment_method,
-#                 "payment_date": payment.payment_date,
-#             })
-
-#     return JsonResponse(data, safe=False)
-
-
 
 
 
@@ -3027,8 +3186,8 @@ def view_enquiry(request):
 
         return JsonResponse(data, safe=False)
 
-
-@csrf_exempt
+@api_view(['DELETE'])
+@permission_classes([IsSuperAdmin])
 def delete_enquiry(request, enquiry_id):
     if request.method == "DELETE":
         enquiry = get_object_or_404(Enquiry, id=enquiry_id)
@@ -3157,7 +3316,6 @@ def add_income(request):
         date=data.get("date"),
         is_system_generated=False
     )
-
 
     return JsonResponse(
         {
@@ -3623,7 +3781,6 @@ def generate_diet(request):
     gender = member.gender
     height = member.height
     weight = member.weight
-    # goal = member.goal
     # food = member.food_preference
 
     client = Groq(api_key=settings.GROQ_API_KEY)
@@ -3710,7 +3867,8 @@ Return exactly in this format:
 """
 
     chat = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        # model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         messages=[
             {
                 "role": "system",
@@ -3748,329 +3906,1145 @@ Return exactly in this format:
     )
 
 
-# .....................helper 
-
-import json
-import requests
-
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
 from django.conf import settings
-from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 
 from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
 
 from groq import Groq
 
-from .models import Member
+from .models import Member, Exercises, GymEquipment
+from .serializers import ExerciseSerializer
 
+from .ai_image import generate_exercise_image
+from .models import GymEquipment
+from .serializers import GymEquipmentSerializer
+from .ai_image import generate_exercise_image
 
-EXERCISE_API_URL = "https://exercisedb.p.rapidapi.com/exercises/name/"
+@api_view(["GET", "POST"])
+def gym_equipment(request):
 
-def build_gif_url(exercise_id, resolution="360"):
-    if not exercise_id:
-        return None
-    return (
-        f"https://exercisedb.p.rapidapi.com/image"
-        f"?exerciseId={exercise_id}"
-        f"&resolution={resolution}"
-        f"&rapidapi-key={settings.EXERCISE_API_KEY}"
-    )
+    # ==========================================
+    # GET ALL EQUIPMENT
+    # ==========================================
 
-def search_exercise(exercise_name):
-    """
-    Search ExerciseDB and return the first matching exercise.
-    """
+    if request.method == "GET":
 
-    try:
-        response = requests.get(
-            f"{EXERCISE_API_URL}{exercise_name}",
-            headers={
-                "X-RapidAPI-Key": settings.EXERCISE_API_KEY,
-                "X-RapidAPI-Host": "exercisedb.p.rapidapi.com",
-            },
-            timeout=10,
+        equipment = GymEquipment.objects.all().order_by("name")
+
+        serializer = GymEquipmentSerializer(
+            equipment,
+            many=True
         )
 
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-
-        if not isinstance(data, list) or len(data) == 0:
-            return None
-
-        exercise = data[0]
-
-        return {
-            "id": exercise.get("id"),
-            "name": exercise.get("name"),
-            "gifUrl": build_gif_url(exercise.get("id")),
-            "bodyPart": exercise.get("bodyPart"),
-            "target": exercise.get("target"),
-            "equipment": exercise.get("equipment"),
-            "secondaryMuscles": exercise.get("secondaryMuscles", []),
-            "instructions": exercise.get("instructions", []),
-        }
-
-    except Exception as e:
-        print("ExerciseDB Error:", e)
-        return None
-
-import re
+        return Response({
+            "success": True,
+            "equipment": serializer.data
+        })
 
 
+    # ==========================================
+    # ADD EQUIPMENT
+    # ==========================================
 
+    if request.method == "POST":
+
+        serializer = GymEquipmentSerializer(
+            data=request.data
+        )
+
+        if serializer.is_valid():
+
+            equipment = serializer.save()
+
+            return Response({
+                "success": True,
+                "message": "Equipment added successfully",
+                "equipment": GymEquipmentSerializer(
+                    equipment
+                ).data
+            }, status=status.HTTP_201_CREATED)
+  
+        return Response({
+            "success": False,
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["PUT", "DELETE"])
+def gym_equipment_detail(request, equipment_id):
+
+    try:
+
+        equipment = GymEquipment.objects.get(
+            id=equipment_id
+        )
+
+    except GymEquipment.DoesNotExist:
+
+        return Response({
+            "success": False,
+            "error": "Equipment not found"
+        }, status=status.HTTP_404_NOT_FOUND)
+
+
+    # ==========================================
+    # UPDATE
+    # ==========================================
+
+    if request.method == "PUT":
+
+        serializer = GymEquipmentSerializer(
+            equipment,
+            data=request.data
+        )
+
+        if serializer.is_valid():
+
+            equipment = serializer.save()
+
+            return Response({
+                "success": True,
+                "message": "Equipment updated successfully",
+                "equipment": serializer.data
+            })
+
+        return Response({
+            "success": False,
+            "errors": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+    # ==========================================
+    # DELETE
+    # ==========================================
+
+    if request.method == "DELETE":
+
+        equipment.delete()
+
+        return Response({
+            "success": True,
+            "message": "Equipment deleted successfully"
+        })
+
+    
+
+
+
+from rest_framework.decorators import api_view
+
+from rest_framework.response import Response
+
+from rest_framework import status
+
+from .models import Exercises
+
+from .serializers import ExerciseSerializer
+
+@api_view(["POST"])
+def create_exercise(request):
+
+    serializer = ExerciseSerializer(
+        data=request.data
+    )
+
+    if serializer.is_valid():
+
+        exercise = serializer.save()
+
+        return Response({
+
+            "success": True,
+
+            "message": "Exercise created successfully",
+
+            "exercise": serializer.data
+
+        }, status=status.HTTP_201_CREATED)
+
+    return Response({
+
+        "success": False,
+
+        "errors": serializer.errors
+
+    }, status=status.HTTP_400_BAD_REQUEST)
+import json
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+
+from groq import Groq
+
+from .models import Member, Exercises, GymEquipment
+from .ai_image import generate_exercise_image
+import json
+
+from django.conf import settings
+from django.shortcuts import get_object_or_404
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
+
+from groq import Groq
+
+from .models import Member, GymEquipment, Exercises
 
 
 @api_view(["POST"])
 def generate_workout(request):
 
+    # =====================================================
+    # 1. MEMBER
+    # =====================================================
+
     member_id = request.data.get("member_id")
 
     if not member_id:
-        return JsonResponse(
-            {"success": False, "error": "member_id is required."},
-            status=400
+        return Response(
+            {
+                "success": False,
+                "error": "member_id is required"
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    member = get_object_or_404(Member, id=member_id)
+    member = get_object_or_404(
+        Member,
+        id=member_id
+    )
 
-    age = member.age
-    gender = member.gender
-    height = float(member.height)
-    weight = float(member.weight)
+    # =====================================================
+    # 2. HEIGHT / WEIGHT
+    # =====================================================
 
-    if height <= 0 or weight <= 0:
-        return JsonResponse(
-            {"success": False, "error": "Invalid height or weight for this member."},
-            status=400
+    if not member.height or not member.weight:
+
+        return Response(
+            {
+                "success": False,
+                "error": "Height and weight are required"
+            },
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    bmi = round(weight / ((height / 100) ** 2), 1)
+    try:
 
-    if bmi < 18.5:
-        bmi_status = "Underweight"
-    elif bmi < 25:
-        bmi_status = "Normal"
-    elif bmi < 30:
-        bmi_status = "Overweight"
-    else:
-        bmi_status = "Obese"
+        height_m = float(member.height) / 100
+        weight = float(member.weight)
 
-    client = Groq(api_key=settings.GROQ_API_KEY)
+    except (ValueError, TypeError):
+
+        return Response(
+            {
+                "success": False,
+                "error": "Invalid height or weight"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if height_m <= 0 or weight <= 0:
+
+        return Response(
+            {
+                "success": False,
+                "error": "Invalid height or weight"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # =====================================================
+    # 3. BMI
+    # =====================================================
+
+    bmi = weight / (height_m ** 2)
+
+    # =====================================================
+    # 4. AVAILABLE EQUIPMENT
+    # =====================================================
+
+    gym_equipment = GymEquipment.objects.filter(
+        is_available=True,
+        quantity__gt=0
+    )
+
+    if not gym_equipment.exists():
+
+        return Response(
+            {
+                "success": False,
+                "error": "No gym equipment is currently available"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    available_equipment = []
+
+    for equipment in gym_equipment:
+
+        if equipment.name:
+
+            available_equipment.append(
+                equipment.name.strip()
+            )
+
+    if not available_equipment:
+
+        return Response(
+            {
+                "success": False,
+                "error": "No valid gym equipment found"
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # =====================================================
+    # 5. EQUIPMENT NORMALIZATION
+    # =====================================================
+
+    def normalize_equipment(value):
+
+        if not value:
+            return "bodyweight"
+
+        value = value.strip().lower()
+
+        aliases = {
+
+            "dumbbells": "dumbbell",
+            "dumbbell": "dumbbell",
+
+            "barbells": "barbell",
+            "barbell": "barbell",
+
+            "cables": "cable",
+            "cable machine": "cable",
+            "cable": "cable",
+
+            "machines": "machine",
+            "machine": "machine",
+
+            "pull up bar": "pullup bar",
+            "pull-up bar": "pullup bar",
+            "pullup bar": "pullup bar",
+
+            "body weight": "bodyweight",
+            "bodyweight": "bodyweight",
+        }
+
+        return aliases.get(value, value)
+
+    # Remove duplicate equipment names
+    available_equipment = list(
+        dict.fromkeys(available_equipment)
+    )
+
+    available_equipment_normalized = {
+        normalize_equipment(equipment)
+        for equipment in available_equipment
+    }
+
+    # =====================================================
+    # 6. GET ALL EXERCISES
+    # =====================================================
+
+    all_exercises = (
+        Exercises.objects
+        .all()
+        .order_by("id")
+    )
+
+    available_exercises = []
+
+    seen_exercise_names = set()
+
+    for exercise in all_exercises:
+
+        if not exercise.name:
+            continue
+
+        normalized_name = (
+            exercise.name
+            .strip()
+            .lower()
+        )
+
+        # Prevent duplicate exercise names
+        if normalized_name in seen_exercise_names:
+            continue
+
+        # -------------------------------------------------
+        # BODYWEIGHT
+        # -------------------------------------------------
+
+        if not exercise.equipment:
+
+            available_exercises.append(exercise)
+
+            seen_exercise_names.add(
+                normalized_name
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # EQUIPMENT
+        # -------------------------------------------------
+
+        exercise_equipment = normalize_equipment(
+            exercise.equipment
+        )
+
+        if exercise_equipment in available_equipment_normalized:
+
+            available_exercises.append(exercise)
+
+            seen_exercise_names.add(
+                normalized_name
+            )
+
+    # =====================================================
+    # 7. REQUIRED BODY PARTS
+    # =====================================================
+
+    required_body_parts = [
+        "Chest",
+        "Back",
+        "Legs",
+        "Shoulders",
+        "Biceps",
+        "Triceps"
+    ]
+
+    # =====================================================
+    # 8. GROUP EXERCISES
+    # =====================================================
+
+    exercises_by_body_part = {}
+
+    for exercise in available_exercises:
+
+        if not exercise.body_part:
+            continue
+
+        body_part = (
+            exercise.body_part
+            .strip()
+            .lower()
+        )
+
+        if body_part not in exercises_by_body_part:
+
+            exercises_by_body_part[body_part] = []
+
+        exercises_by_body_part[body_part].append(
+            {
+                "id": exercise.id,
+                "name": exercise.name,
+                "equipment": (
+                    exercise.equipment
+                    if exercise.equipment
+                    else "Bodyweight"
+                )
+            }
+        )
+
+    # =====================================================
+    # 9. CHECK 4 EXERCISES PER BODY PART
+    # =====================================================
+
+    missing_body_parts = []
+
+    for body_part in required_body_parts:
+
+        exercises_for_part = (
+            exercises_by_body_part.get(
+                body_part.lower(),
+                []
+            )
+        )
+
+        if len(exercises_for_part) < 4:
+
+            missing_body_parts.append(
+                {
+                    "body_part": body_part,
+                    "available": len(exercises_for_part),
+                    "required": 4
+                }
+            )
+
+    if missing_body_parts:
+
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    "Not enough compatible exercises "
+                    "for the available equipment"
+                ),
+                "missing_body_parts": missing_body_parts,
+                "available_equipment": available_equipment
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # =====================================================
+    # 10. PREPARE EXERCISES FOR AI
+    # =====================================================
+
+    ai_exercises = {}
+
+    for body_part in required_body_parts:
+
+        ai_exercises[body_part] = (
+            exercises_by_body_part[
+                body_part.lower()
+            ]
+        )
+
+    # =====================================================
+    # 11. GROQ CLIENT
+    # =====================================================
+
+    client = Groq(
+        api_key=settings.GROQ_API_KEY
+    )
+
+    # =====================================================
+    # 12. PROMPT
+    # =====================================================
 
     prompt = f"""
-You are a certified strength and conditioning coach.
+You are a professional gym workout planner.
 
-Create a personalized 6-day workout plan based on the member's BMI.
+Create a 6-day workout plan for this member.
 
-Member Details
+MEMBER:
 
-Age: {age}
-Gender: {gender}
-Height: {height} cm
-Weight: {weight} kg
-BMI: {bmi}
-BMI Category: {bmi_status}
+Age: {member.age}
 
-Rules:
+Gender: {member.gender}
 
-1. Workout MUST match BMI.
-2. Underweight → muscle gain.
-3. Normal → balanced hypertrophy.
-4. Overweight → fat loss + cardio.
-5. Obese → beginner friendly + low impact.
+Height: {member.height} cm
 
-Generate:
+Weight: {member.weight} kg
 
-Day 1 - Legs
-Day 2 - Chest & Triceps
-Day 3 - Back & Biceps
-Day 4 - Shoulders
-Day 5 - Cardio & Core
-Day 6 - Full Body
+BMI: {round(bmi, 2)}
 
-Each day should contain 5-7 exercises.
 
-VERY IMPORTANT:
+AVAILABLE EQUIPMENT:
 
-Use REAL ExerciseDB exercise names only.
+{json.dumps(
+    available_equipment,
+    indent=2
+)}
 
-Examples:
 
-barbell squat
-leg press
-walking on treadmill
-bench press
-push up
-lat pulldown
-seated cable row
-dumbbell shoulder press
-plank
-crunch
-mountain climber
-burpee
-romanian deadlift
-leg extension
-leg curl
-pec deck fly
-cable crossover
-tricep pushdown
-barbell curl
-hammer curl
-deadlift
-lunges
-hip thrust
-jump rope
+AVAILABLE EXERCISES:
 
-Return ONLY VALID JSON.
+{json.dumps(
+    ai_exercises,
+    indent=2
+)}
 
-Do not return markdown.
 
-Do not return explanations.
+STRICT RULES:
 
-Return exactly this structure:
+1. Create exactly 6 days.
+
+2. Day 1 = Chest.
+
+3. Day 2 = Back.
+
+4. Day 3 = Legs.
+
+5. Day 4 = Shoulders.
+
+6. Day 5 = Biceps.
+
+7. Day 6 = Triceps.
+
+8. Each day must contain exactly 4 exercises.
+
+9. Total exercises must be exactly 24.
+
+10. Every exercise must be unique.
+
+11. NEVER repeat an exercise.
+
+12. ONLY use exercise IDs from AVAILABLE EXERCISES.
+
+13. NEVER invent an exercise.
+
+14. NEVER invent an exercise ID.
+
+15. NEVER use unavailable equipment.
+
+16. Every exercise must belong to its day's body part.
+
+17. Select exercises appropriately for the member's BMI.
+
+18. Choose appropriate sets.
+
+19. Choose appropriate reps.
+
+20. Choose appropriate rest.
+
+21. Do NOT include markdown.
+
+22. Do NOT include explanations outside JSON.
+
+23. Do NOT include exercise names instead of IDs.
+
+24. exercise_id must exactly match the supplied exercise ID.
+
+25. Return ONLY valid JSON.
+
+IMPORTANT:
+Do not add trailing commas.
+Use double quotes for all JSON keys and string values.
+
+JSON STRUCTURE:
 
 {{
-    "member": {{
-        "age": {age},
-        "gender": "{gender}",
-        "height": {height},
-        "weight": {weight},
-        "bmi": {bmi},
-        "category": "{bmi_status}"
-    }},
-    "weekly_plan": [
+    "days": [
         {{
-            "day": "Day 1",
-            "title": "Legs",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
+            "day": 1,
+            "body_part": "Chest",
             "exercises": [
-                {{
-                    "name": "",
-                    "description": "",
-                    "sets": "",
-                    "reps": "",
-                    "rest": ""
-                }}
+{{
+    "exercise_id": 38,
+    "sets": 4,
+    "reps": 10,
+    "rest": "90 seconds"
+}}
             ]
-        }},
-        {{
-            "day": "Day 2",
-            "title": "Chest & Triceps",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
-            "exercises": []
-        }},
-        {{
-            "day": "Day 3",
-            "title": "Back & Biceps",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
-            "exercises": []
-        }},
-        {{
-            "day": "Day 4",
-            "title": "Shoulders",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
-            "exercises": []
-        }},
-        {{
-            "day": "Day 5",
-            "title": "Cardio & Core",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
-            "exercises": []
-        }},
-        {{
-            "day": "Day 6",
-            "title": "Full Body",
-            "duration": "",
-            "intensity": "",
-            "focus": "",
-            "exercises": []
         }}
     ]
 }}
+
+Return exactly 6 days and exactly 24 unique exercise IDs.
 """
 
+    # =====================================================
+    # 13. GROQ REQUEST
+    # =====================================================
+
     try:
+
         chat = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
+
             messages=[
-                {"role": "system", "content": "You are an expert certified gym trainer."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a professional workout planner. "
+                        "Return ONLY valid JSON."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
             ],
-            temperature=0.5,
+
+            temperature=0.1,
+            max_tokens=5000,
+            response_format={
+                "type": "json_object"
+            }
         )
-        ai_response = chat.choices[0].message.content
+
+        ai_response = (
+            chat
+            .choices[0]
+            .message
+            .content
+            .strip()
+        )
+
     except Exception as e:
-        return JsonResponse(
-            {"success": False, "error": f"AI request failed: {str(e)}"},
-            status=502
-        )
 
-    # Strip markdown fences in case the model ignores the "no markdown" instruction
-    cleaned_response = ai_response.strip()
-    cleaned_response = re.sub(r"^```(?:json)?|```$", "", cleaned_response, flags=re.MULTILINE).strip()
-
-    try:
-        workout_json = json.loads(cleaned_response)
-
-        # ----------------------------------------
-        # Enrich workout with ExerciseDB data
-        # ----------------------------------------
-        for day in workout_json.get("weekly_plan", []):
-
-            for exercise in day.get("exercises", []):
-
-                exercise_name = exercise.get("name", "").strip()
-
-                if not exercise_name:
-                    continue
-
-                exercise_data = search_exercise(exercise_name)
-
-                if exercise_data:
-                    exercise["exercise_id"] = exercise_data["id"]
-                    exercise["gifUrl"] = exercise_data["gifUrl"]
-                    exercise["bodyPart"] = exercise_data["bodyPart"]
-                    exercise["target"] = exercise_data["target"]
-                    exercise["equipment"] = exercise_data["equipment"]
-                    exercise["secondaryMuscles"] = exercise_data["secondaryMuscles"]
-                    exercise["instructions"] = exercise_data["instructions"]
-                else:
-                    exercise["exercise_id"] = None
-                    exercise["gifUrl"] = None
-                    exercise["bodyPart"] = ""
-                    exercise["target"] = ""
-                    exercise["equipment"] = ""
-                    exercise["secondaryMuscles"] = []
-                    exercise["instructions"] = []
-
-    except json.JSONDecodeError:
-        return JsonResponse(
+        return Response(
             {
                 "success": False,
-                "error": "AI returned invalid JSON.",
-                "raw_response": ai_response
+                "error": "Failed to generate workout",
+                "details": str(e)
             },
-            status=500
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-    return JsonResponse(
-        {"success": True, "workout_plan": workout_json}
+    # =====================================================
+    # DEBUG
+    # =====================================================
+
+    print("\n================ AI RESPONSE ================\n")
+    print(ai_response)
+    print("\n==============================================\n")
+
+    # =====================================================
+    # 14. PARSE JSON
+    # =====================================================
+
+    try:
+
+        workout_data = json.loads(
+            ai_response
+        )
+
+    except json.JSONDecodeError as e:
+
+        return Response(
+            {
+                "success": False,
+                "error": "AI returned invalid JSON",
+                "details": str(e),
+                "raw_response": ai_response
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # =====================================================
+    # 15. VALIDATE DAYS
+    # =====================================================
+
+    days = workout_data.get(
+        "days",
+        []
     )
 
-    # Part 3 starts here...
-    
+    if not isinstance(days, list):
+
+        return Response(
+            {
+                "success": False,
+                "error": "Invalid days format"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    if len(days) != 6:
+
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    "Workout must contain exactly 6 days"
+                )
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # =====================================================
+    # 16. EXERCISE LOOKUP
+    # =====================================================
+
+    exercise_lookup = {
+        exercise.id: exercise
+        for exercise in available_exercises
+    }
+
+    used_exercise_ids = set()
+    used_exercise_names = set()
+
+    expected_body_parts = [
+        "Chest",
+        "Back",
+        "Legs",
+        "Shoulders",
+        "Biceps",
+        "Triceps"
+    ]
+
+    # =====================================================
+    # 17. VALIDATE EACH DAY
+    # =====================================================
+
+    for index, day in enumerate(days):
+
+        expected_day = index + 1
+
+        expected_body_part = (
+            expected_body_parts[index]
+        )
+
+        # -------------------------------------------------
+        # DAY NUMBER
+        # -------------------------------------------------
+
+        if day.get("day") != expected_day:
+
+            return Response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Invalid day number. "
+                        f"Expected {expected_day}"
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # -------------------------------------------------
+        # BODY PART
+        # -------------------------------------------------
+
+        actual_body_part = str(
+            day.get("body_part", "")
+        ).strip().lower()
+
+        if actual_body_part != expected_body_part.lower():
+
+            return Response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Day {expected_day} must be "
+                        f"{expected_body_part}"
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # -------------------------------------------------
+        # EXERCISES
+        # -------------------------------------------------
+
+        exercises_for_day = day.get(
+            "exercises",
+            []
+        )
+
+        if not isinstance(
+            exercises_for_day,
+            list
+        ):
+
+            return Response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Invalid exercises format "
+                        f"on day {expected_day}"
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        if len(exercises_for_day) != 4:
+
+            return Response(
+                {
+                    "success": False,
+                    "error": (
+                        f"Day {expected_day} must have "
+                        f"exactly 4 exercises"
+                    )
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # -------------------------------------------------
+        # EACH EXERCISE
+        # -------------------------------------------------
+
+        for exercise_data in exercises_for_day:
+
+            exercise_id = exercise_data.get(
+                "exercise_id"
+            )
+
+            if not exercise_id:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Exercise ID missing "
+                            f"on day {expected_day}"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # ---------------------------------------------
+            # DATABASE EXERCISE
+            # ---------------------------------------------
+
+            exercise = exercise_lookup.get(
+                exercise_id
+            )
+
+            if not exercise:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Exercise ID {exercise_id} "
+                            f"is not available with "
+                            f"current gym equipment"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # ---------------------------------------------
+            # DUPLICATE ID
+            # ---------------------------------------------
+
+            if exercise.id in used_exercise_ids:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Exercise '{exercise.name}' "
+                            f"was repeated"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # ---------------------------------------------
+            # DUPLICATE NAME
+            # ---------------------------------------------
+
+            exercise_name_key = (
+                exercise.name
+                .strip()
+                .lower()
+            )
+
+            if exercise_name_key in used_exercise_names:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Duplicate exercise "
+                            f"name '{exercise.name}'"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            used_exercise_ids.add(
+                exercise.id
+            )
+
+            used_exercise_names.add(
+                exercise_name_key
+            )
+
+            # ---------------------------------------------
+            # BODY PART CHECK
+            # ---------------------------------------------
+
+            if not exercise.body_part:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"{exercise.name} has no "
+                            f"body part"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            if (
+                exercise.body_part
+                .strip()
+                .lower()
+                != expected_body_part.lower()
+            ):
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"{exercise.name} does not "
+                            f"belong to "
+                            f"{expected_body_part}"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            # ---------------------------------------------
+            # DESCRIPTION
+            # ---------------------------------------------
+
+            description = exercise_data.get(
+                "description"
+            )
+
+            if not description:
+
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"AI did not generate "
+                            f"description for "
+                            f"{exercise.name}"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+
+            exercise_data["description"] = (
+                str(description).strip()
+            )
+
+            # ---------------------------------------------
+            # DATABASE DATA
+            # ---------------------------------------------
+
+            exercise_data["exercise_id"] = (
+                exercise.id
+            )
+
+            exercise_data["name"] = (
+                exercise.name
+            )
+
+            exercise_data["body_part"] = (
+                exercise.body_part
+            )
+
+            exercise_data["equipment"] = (
+                exercise.equipment
+                if exercise.equipment
+                else "Bodyweight"
+            )
+
+            # =================================================
+            # IMAGE
+            # =================================================
+
+            exercise_data["image"] = None
+
+            if exercise.image:
+
+                try:
+
+                    exercise_data["image"] = (
+                        exercise.image.url
+                    )
+
+                except Exception:
+
+                    exercise_data["image"] = None
+
+            else:
+
+                try:
+
+                    public_id = (
+                        generate_exercise_image(
+                            exercise
+                        )
+                    )
+
+                    exercise.image = public_id
+
+                    exercise.save(
+                        update_fields=["image"]
+                    )
+
+                    exercise.refresh_from_db(
+                        fields=["image"]
+                    )
+
+                    exercise_data["image"] = (
+                        exercise.image.url
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"Image generation failed "
+                        f"for {exercise.name}: {e}"
+                    )
+
+                    exercise_data["image"] = None
+
+    # =====================================================
+    # 18. FINAL 24 EXERCISE CHECK
+    # =====================================================
+
+    if len(used_exercise_ids) != 24:
+
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    "Workout must contain "
+                    "exactly 24 unique exercises"
+                )
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # =====================================================
+    # 19. FINAL NAME CHECK
+    # =====================================================
+
+    if len(used_exercise_names) != 24:
+
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    "Workout contains duplicate "
+                    "exercise names"
+                )
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # =====================================================
+    # 20. FINAL RESPONSE
+    # =====================================================
+
+    return Response(
+        {
+            "success": True,
+
+            "member": {
+                "id": member.id,
+                "age": member.age,
+                "gender": member.gender,
+                "height": member.height,
+                "weight": member.weight,
+                "bmi": round(bmi, 2)
+            },
+
+            "available_equipment":
+                available_equipment,
+
+            "workout_plan":
+                workout_data
+        },
+        status=status.HTTP_200_OK
+    )
+
 # from rest_framework.decorators import api_view
 # from rest_framework.response import Response
 # from .models import DietPlanPDF
@@ -4079,7 +5053,6 @@ Return exactly this structure:
 
 # @api_view(["POST"])
 # def upload_diet_pdf(request):
-
 #     serializer = DietPlanPDFSerializer(
 #         data=request.data,
 #         context={

@@ -281,5 +281,29 @@ class DietPlanPDF(models.Model):
     )
 
 
+class Exercises(models.Model):
+    name = models.CharField(max_length=150)
+    body_part = models.CharField(max_length=100)
+    equipment = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+    image = CloudinaryField(
+        "image",
+        blank=True,
+        null=True
+    )
+
+    def __str__(self):
+        return self.name
 
 
+class GymEquipment(models.Model):
+    name = models.CharField(max_length=255)
+    quantity = models.PositiveIntegerField(default=1)
+    is_available = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name

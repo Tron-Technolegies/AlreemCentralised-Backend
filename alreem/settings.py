@@ -126,6 +126,13 @@ DATABASES = {
     }
 }
 
+# DATABASES = {
+#     "default": {
+#         "ENGINE": "django.db.backends.sqlite3",
+#         "NAME": BASE_DIR / "db.sqlite3",
+#     }
+# }
+
 EXERCISE_API_KEY = os.getenv(
     "EXERCISE_API_KEY"
 )
@@ -137,8 +144,10 @@ EXERCISE_API_KEY = os.getenv(
 #         default=os.environ.get("DATABASE_URL")
 #     )
 # }
-
+# GENERATE_EXERCISE_IMAGES = False
+HF_TOKEN = os.getenv("HF_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 cloudinary.config(
     cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),

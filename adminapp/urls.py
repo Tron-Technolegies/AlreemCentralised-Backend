@@ -68,26 +68,23 @@ urlpatterns = [
     path("enquiries/",views.view_enquiry,name="enquiry"),
     path("enquiries/<int:enquiry_id>/delete/", views.delete_enquiry, name="delete_enquiry"),
 
-    path("all_expenses/",views.expenses),
-    path("add_expense/",views.add_expense),
-    path("add_income/",views.add_income),
-    path("all_incomes/",views.incomes),
-    path("income_by_members/",views.income_by_members),
+    path("all_expenses/",views.expenses, name="all_expenses"),
+    path("add_expense/",views.add_expense ,name="add_expense"),
+    path("add_income/",views.add_income, name="add_income"),
+    path("all_incomes/",views.incomes, name="all_incomes"),
+    path("income_by_members/",views.income_by_members, name="income_by_members"),
 
     path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
     path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
+#    path("gym-equipment/create/",views.create_gym_equipment ),
+
+    path("gym-equipment/",views.gym_equipment,name="gym_equipment"),
+    path("gym-equipment/<int:equipment_id>/",views.gym_equipment_detail,name="gym_equipment_detail"),
+
+    path("create_exercise/",views.create_exercise,name="create_exercise"),
 
     path("generate-diet/",views.generate_diet,name="generate-diet"),
-    path("generate-workout/",views.generate_workout,name="generate_workout-diet"),
-
-#     path(
-#         "exercise-search/",
-#         views.exercise_search
-#     ),
-#     path(
-#     "exercise/<str:exercise_id>/",
-#     views.exercise_detail
-# ),
-    # path("upload-diet-pdf/",views.upload_diet_pdf),
-
+    path("generate_workout/",views.generate_workout,name="generate_workout"),
+    
+    path("import-csv/",views.import_csv, name="import_csv"),
 ]
