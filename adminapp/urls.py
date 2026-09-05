@@ -81,10 +81,8 @@ urlpatterns = [
     path("gym-equipment/",views.gym_equipment,name="gym_equipment"),
     path("gym-equipment/<int:equipment_id>/",views.gym_equipment_detail,name="gym_equipment_detail"),
 
-    path("create_exercise/",views.create_exercise,name="create_exercise"),
-
     path("generate-diet/",views.generate_diet,name="generate-diet"),
     path("generate_workout/",views.generate_workout,name="generate_workout"),
     
-    path("import-csv/",views.import_csv, name="import_csv"),
+    # path("import-csv/",views.import_csv, name="import_csv"),
 ]

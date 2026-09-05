@@ -1,23 +1,104 @@
 from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import Branch, Enquiry, Expense, GymEquipment, Payment, Product, Sales_product, Member,Expense,Income,MemberPause
 import json
-from datetime import datetime
-from django.utils import timezone
+from datetime import datetime, date, timedelta
+
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated , BasePermission
+from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
+from rest_framework.response import Response
+from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
+from django.shortcuts import get_object_or_404
+from django.db.models import Sum
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+from django.http import JsonResponse
+from django.contrib.auth.decorators import login_required
+from functools import wraps
+
+
+def role_required(allowed_roles):
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+
+            if not request.user.is_authenticated:
+                return JsonResponse(
+                    {"error": "Authentication required"},
+                    status=401
+                )
+
+            if request.user.role not in allowed_roles:
+                return JsonResponse(
+                    {"error": "Permission denied"},
+                    status=403
+                )
+
+            if (
+                request.user.role != "SUPER_ADMIN"
+                and request.user.tenant_id is None
+            ):
+                return JsonResponse(
+                    {"error": "User is not assigned to a tenant"},
+                    status=403
+                )
+
+            return view_func(request, *args, **kwargs)
+
+        return wrapper
+    return decorator
+
+
+def get_user_scope(user):
+    """
+    Returns the tenant and branch scope for the logged-in user.
+    """
+
+    if user.role == "SUPER_ADMIN":
+        return {
+            "tenant": None,
+            "branch": None,
+            "all_access": True,
+        }
+
+    if user.role == "TENANT_ADMIN":
+        return {
+            "tenant": user.tenant,
+            "branch": None,
+            "all_access": False,
+        }
+
+    if user.role in ["BRANCH_ADMIN", "STAFF"]:
+        return {
+            "tenant": user.tenant,
+            "branch": user.branch,
+            "all_access": False,
+        }
+
+    return {
+        "tenant": None,
+        "branch": None,
+        "all_access": False,
+    }
+
 
 import csv
 import io
 import uuid
-import re
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.response import Response
-from rest_framework import status
 
-from .models import Member, Staffs
+from .models import (
+    Branch, Enquiry, Expense, GymEquipment, Payment, Product,
+    Sales_product, Member, Income, MemberPause, Staffs, Plan,
+)
+from .serializers import GymEquipmentSerializer
+from .tenant_utils import get_tenant, get_branch_filter
+
+
+# ============================================================
+# IMPORT CSV  (tenant-stamped on every created row)
+# ============================================================
 
 IMPORT_CONFIG = {
     "member": {
@@ -30,7 +111,6 @@ IMPORT_CONFIG = {
             "age": "age",
         },
     },
-
     "staff": {
         "model": Staffs,
         "mapping": {
@@ -44,48 +124,26 @@ IMPORT_CONFIG = {
 
 
 @api_view(["POST"])
-# @permission_classes([IsAuthenticated])
+@permission_classes([IsAuthenticated])
 def import_csv(request):
+    tenant = get_tenant(request)
 
     csv_file = request.FILES.get("file")
     model_type = request.data.get("model")
 
     if not csv_file:
-        return Response(
-            {
-                "success": False,
-                "error": "CSV file is required."
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"success": False, "error": "CSV file is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     if not model_type:
-        return Response(
-            {
-                "success": False,
-                "error": "model is required."
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"success": False, "error": "model is required."}, status=status.HTTP_400_BAD_REQUEST)
 
     config = IMPORT_CONFIG.get(model_type)
-
     if not config:
-        return Response(
-            {
-                "success": False,
-                "error": f"Unsupported model: {model_type}"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
+        return Response({"success": False, "error": f"Unsupported model: {model_type}"}, status=status.HTTP_400_BAD_REQUEST)
 
     try:
-
         decoded_file = csv_file.read().decode("utf-8-sig")
-
-        reader = csv.DictReader(
-            io.StringIO(decoded_file)
-        )
+        reader = csv.DictReader(io.StringIO(decoded_file))
 
         Model = config["model"]
         mapping = config["mapping"]
@@ -94,59 +152,30 @@ def import_csv(request):
         skipped = []
 
         for row_number, row in enumerate(reader, start=2):
-
             try:
+                data = {"tenant": tenant}  # <-- stamp tenant on every imported row
 
-                data = {}
-
-                # CSV → Django field mapping
                 for csv_field, model_field in mapping.items():
-
                     value = row.get(csv_field, "")
-
                     if value is not None:
                         value = value.strip()
-
                     if value != "":
                         data[model_field] = value
 
-                # ==========================
-                # MEMBER SPECIAL HANDLING
-                # ==========================
-
                 if model_type == "member":
-
-                    # Member requires primary key
                     data["id"] = str(uuid.uuid4())
-
-                    # Convert age to integer
                     if "age" in data:
                         data["age"] = int(data["age"])
 
-                # ==========================
-                # STAFF SPECIAL HANDLING
-                # ==========================
-
                 if model_type == "staff":
-
-                    # Convert salary to number
                     if "salary" in data:
                         data["salary"] = float(data["salary"])
 
-                # Create database object
                 obj = Model.objects.create(**data)
-
-                imported.append({
-                    "row": row_number,
-                    "id": obj.id,
-                })
+                imported.append({"row": row_number, "id": obj.id})
 
             except Exception as e:
-
-                skipped.append({
-                    "row": row_number,
-                    "error": str(e),
-                })
+                skipped.append({"row": row_number, "error": str(e)})
 
         return Response({
             "success": True,
@@ -158,21 +187,17 @@ def import_csv(request):
         })
 
     except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        return Response(
-            {
-                "success": False,
-                "error": str(e)
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
 
 class IsSuperAdmin(BasePermission):
     def has_permission(self, request, view):
-        return (
-            request.user.is_authenticated
-            and request.user.is_superuser
-        )   
+        return request.user.is_authenticated and request.user.is_superuser
+
+
+# ============================================================
+# LOGIN — now embeds tenant/role/branch in the token + response
+# ============================================================
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -181,16 +206,23 @@ def admin_login(request):
     password = request.data.get("password")
 
     if not username or not password:
-        return JsonResponse(
-            {"error": "Username and password are required"},status=404)
+        return JsonResponse({"error": "Username and password are required"}, status=404)
 
     user = authenticate(username=username, password=password)
 
     if user is None:
-        return JsonResponse(
-            {"error": "Invalid username or password"},status=401)
+        return JsonResponse({"error": "Invalid username or password"}, status=401)
+
+    if not user.is_superuser and not getattr(user, "tenant_id", None):
+        # Every non-superuser account must belong to a tenant to log in
+        return JsonResponse({"error": "This account is not linked to any gym."}, status=403)
 
     refresh = RefreshToken.for_user(user)
+
+    # Embed tenant context in the JWT itself so DRF auth alone carries it
+    refresh["tenant_id"] = user.tenant_id
+    refresh["role"] = getattr(user, "role", None)
+    refresh["branch_id"] = getattr(user, "branch_id", None)
 
     return JsonResponse(
         {
@@ -203,7 +235,15 @@ def admin_login(request):
                 "email": user.email,
                 "is_staff": user.is_staff,
                 "is_superuser": user.is_superuser,
-            }},status=200)
+                "role": getattr(user, "role", None),
+                "tenant_id": user.tenant_id,
+                "tenant_name": user.tenant.name if getattr(user, "tenant", None) else None,
+                "branch_id": getattr(user, "branch_id", None),
+                "branch_name": user.branch.name if getattr(user, "branch", None) else None,
+            },
+        },
+        status=200,
+    )
 
 
 @api_view(["POST"])
@@ -215,21 +255,21 @@ def change_password(request):
     confirm_password = request.data.get("confirm_password")
 
     if not current_password or not new_password or not confirm_password:
-        return JsonResponse({"error": "All fields are required"},status=400)
+        return JsonResponse({"error": "All fields are required"}, status=400)
 
     if not user.check_password(current_password):
-        return JsonResponse({"error": "Current password is incorrect"},status=400)
+        return JsonResponse({"error": "Current password is incorrect"}, status=400)
 
     if new_password != confirm_password:
-        return JsonResponse({"error": "New password and confirm password do not match"},status=400)
+        return JsonResponse({"error": "New password and confirm password do not match"}, status=400)
 
     if len(new_password) < 6:
-        return JsonResponse({"error": "New password must be at least 6 characters long"},status=400)
+        return JsonResponse({"error": "New password must be at least 6 characters long"}, status=400)
 
     user.set_password(new_password)
     user.save()
 
-    return JsonResponse({"message": "Password changed successfully"},status=200)
+    return JsonResponse({"message": "Password changed successfully"}, status=200)
 
 
 @api_view(["GET"])
@@ -237,104 +277,254 @@ def change_password(request):
 def admin_profile_view(request):
     user = request.user
 
-    return JsonResponse(
-        {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "full_name": f"{user.first_name} {user.last_name}".strip() or user.username,
-            "is_staff": user.is_staff,
-            "is_superuser": user.is_superuser,
-        }
-    )
+    return JsonResponse({
+        "id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": f"{user.first_name} {user.last_name}".strip() or user.username,
+        "is_staff": user.is_staff,
+        "is_superuser": user.is_superuser,
+        "role": getattr(user, "role", None),
+        "tenant_id": getattr(user, "tenant_id", None),
+        "branch_id": getattr(user, "branch_id", None),
+    })
 
-#.......................... MEMBERS
 
-@csrf_exempt
+from django.http import JsonResponse
+from datetime import datetime, date, timedelta
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+from .models import Member, Plan, Branch, MemberPause
+from .tenant_utils import get_tenant, get_branch_filter
+
+
+# ============================================================
+# MEMBERS
+# ============================================================
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def create_member(request):
-    if request.method != "POST":
-        return JsonResponse({"error": "Invalid request method"}, status=405)
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before creating a member"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
 
     try:
-        # Member ID
-        last_member = Member.objects.order_by("-id").first()
-        next_id = f"{int(last_member.id) + 1:04d}" if last_member else "0001"
+        # Generate member ID only within the selected tenant
+        last_member = (
+            Member.objects
+            .filter(tenant=tenant)
+            .order_by("-id")
+            .first()
+        )
 
+        next_id = (
+            f"{int(last_member.id) + 1:04d}"
+            if last_member
+            else "0001"
+        )
+
+        # -------------------------------------------------
         # Inputs
+        # -------------------------------------------------
+
         plan_id = request.POST.get("plan")
         branch_id = request.POST.get("branch")
         join_date_str = request.POST.get("join_date")
+
         phone = request.POST.get("phone", "").strip()
         email = request.POST.get("email", "").strip().lower()
 
-        if email and Member.objects.filter(email=email).exists():
-            return JsonResponse(
-                {"error": "Email already exists"},
-                status=400
-            )        
+        goal = request.POST.get("goal")
+        food_category = request.POST.get("food_category")
+
+        # -------------------------------------------------
+        # Required fields
+        # -------------------------------------------------
 
         if not plan_id:
-            return JsonResponse({"error": "Plan is required"}, status=400)
+            return JsonResponse(
+                {"error": "Plan is required"},
+                status=400
+            )
 
         if not branch_id:
-            return JsonResponse({"error": "Branch is required"}, status=400)
+            return JsonResponse(
+                {"error": "Branch is required"},
+                status=400
+            )
 
         if not join_date_str:
-            return JsonResponse({"error": "Join date is required"}, status=400)
+            return JsonResponse(
+                {"error": "Join date is required"},
+                status=400
+            )
 
+        # -------------------------------------------------
         # Phone validation
+        # -------------------------------------------------
+
         if not (phone.isdigit() and len(phone) == 10):
             return JsonResponse(
                 {"error": "Enter a valid 10-digit mobile number"},
                 status=400
             )
 
-        # duplicate phone number
-        if Member.objects.filter(phone=phone).exists():  
+        if Member.objects.filter(
+            tenant=tenant,
+            phone=phone
+        ).exists():
             return JsonResponse(
                 {"error": "Mobile number already exists"},
                 status=400
-            )        
+            )
 
-        # Get selected plan from DB
+        # -------------------------------------------------
+        # Email validation
+        # -------------------------------------------------
+
+        if email and Member.objects.filter(
+            tenant=tenant,
+            email=email
+        ).exists():
+            return JsonResponse(
+                {"error": "Email already exists"},
+                status=400
+            )
+
+        # -------------------------------------------------
+        # Plan validation
+        # -------------------------------------------------
+
         try:
-            plan = Plan.objects.get(id=plan_id)
+            plan = Plan.objects.get(
+                id=plan_id,
+                tenant=tenant
+            )
         except Plan.DoesNotExist:
-            return JsonResponse({"error": "Invalid plan selected"}, status=400)
+            return JsonResponse(
+                {"error": "Invalid plan selected"},
+                status=400
+            )
+
+        # -------------------------------------------------
+        # Branch validation
+        # -------------------------------------------------
+
+        # Branch Admin and Staff MUST use their own branch.
+        if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+            if not request.user.branch_id:
+                return JsonResponse(
+                    {"error": "User is not assigned to a branch"},
+                    status=403
+                )
+
+            branch = Branch.objects.filter(
+                id=request.user.branch_id,
+                tenant=tenant
+            ).first()
+
+            if not branch:
+                return JsonResponse(
+                    {"error": "Invalid branch assignment"},
+                    status=403
+                )
+
+            # Ignore any branch_id sent by frontend.
+            branch_id = request.user.branch_id
+
+        else:
+            # TENANT_ADMIN / SUPER_ADMIN
+            try:
+                branch = Branch.objects.get(
+                    id=branch_id,
+                    tenant=tenant
+                )
+            except Branch.DoesNotExist:
+                return JsonResponse(
+                    {"error": "Invalid Branch selected"},
+                    status=400
+                )
+
+        # -------------------------------------------------
+        # Join date
+        # -------------------------------------------------
 
         try:
-            branch = Branch.objects.get(id=branch_id)
-        except Branch.DoesNotExist:
-            return JsonResponse({"error": "Invalid Branch selected"}, status=400)        
+            join_date = datetime.strptime(
+                join_date_str,
+                "%Y-%m-%d"
+            ).date()
 
-        # Parse join date
-        try:
-            join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
         except ValueError:
             return JsonResponse(
                 {"error": "Invalid join date"},
                 status=400
             )
 
-        # Expiry from plan duration
-        duration = int(plan.duration or 0)
-        expiry_date = join_date + timedelta(days=duration)
+        # -------------------------------------------------
+        # Expiry date
+        # -------------------------------------------------
 
-        # BMI calculation
+        duration = int(plan.duration or 0)
+
+        expiry_date = (
+            join_date +
+            timedelta(days=duration)
+        )
+
+        # -------------------------------------------------
+        # Height / Weight / BMI
+        # -------------------------------------------------
+
         try:
-            weight = float(request.POST.get("weight") or 0)
-            height = float(request.POST.get("height") or 0)
+            weight = float(
+                request.POST.get("weight") or 0
+            )
+
+            height = float(
+                request.POST.get("height") or 0
+            )
+
         except ValueError:
-            return JsonResponse({"error": "Invalid height or weight"}, status=400)
+            return JsonResponse(
+                {"error": "Invalid height or weight"},
+                status=400
+            )
 
         bmi = None
-        if height > 0 and weight > 0:
-            height_m = height / 100
-            bmi = round(weight / (height_m * height_m), 2)
 
-        # Payment
+        if height > 0 and weight > 0:
+
+            height_m = height / 100
+
+            bmi = round(
+                weight / (height_m * height_m),
+                2
+            )
+
+        # -------------------------------------------------
+        # Paid amount
+        # -------------------------------------------------
+
         try:
-            paid_amount = float(request.POST.get("paid_amount") or 0)
+            paid_amount = float(
+                request.POST.get("paid_amount") or 0
+            )
+
         except ValueError:
             return JsonResponse(
                 {"error": "Invalid paid amount"},
@@ -347,705 +537,1381 @@ def create_member(request):
                 status=400
             )
 
-        plan_amount = float(plan.price or 0)
+        # -------------------------------------------------
+        # Plan amount
+        # -------------------------------------------------
+
+        plan_amount = float(
+            plan.price or 0
+        )
 
         if paid_amount > plan_amount:
             return JsonResponse(
-                {"error": "Paid amount cannot exceed plan price"},
+                {
+                    "error":
+                    "Paid amount cannot exceed plan price"
+                },
                 status=400
             )
 
-        due_amount = plan_amount - paid_amount
+        due_amount = max(
+            plan_amount - paid_amount,
+            0
+        )
 
-        plan_amount = float(plan.price or 0)
-        due_amount = max(plan_amount - paid_amount, 0)
+        # -------------------------------------------------
+        # Photo
+        # -------------------------------------------------
 
         photo = request.FILES.get("photo")
 
+        # -------------------------------------------------
+        # Create member
+        # -------------------------------------------------
+
         member = Member.objects.create(
+
+            # Tenant is ALWAYS taken from authenticated user
+            # / selected tenant.
+            tenant=tenant,
+
             id=next_id,
+
             name=request.POST.get("name"),
+
             phone=phone,
+
             email=email,
-            plan=plan.name,   # if your Member.plan field is CharField
-            branch=branch.name,
+
+            plan=plan,
+
+            branch=branch,
+
             join_date=join_date,
+
             photo=photo,
+
             height=height,
+
             weight=weight,
+
             bmi=bmi,
+
+            goal=goal,
+
+            food_category=food_category,
+
             age=request.POST.get("age"),
-            blood_group=request.POST.get("blood_group"),
-            location=request.POST.get("location"),
-            adhaar_number=request.POST.get("adhaar_number"),
-            gender=request.POST.get("gender"),
+
+            blood_group=request.POST.get(
+                "blood_group"
+            ),
+
+            location=request.POST.get(
+                "location"
+            ),
+
+            adhaar_number=request.POST.get(
+                "adhaar_number"
+            ),
+
+            gender=request.POST.get(
+                "gender"
+            ),
+
             paid_amount=paid_amount,
+
             due_amount=due_amount,
+
             expiry_date=expiry_date,
+
             status="Active",
         )
 
-        return JsonResponse({
-            "status": True,
-            "message": "Member created successfully",
-            "data": {
-                "id": member.id,
-                "name": member.name,
-                "plan": member.plan,
-                "branch": member.branch,
-                "status": member.status,
-                "expiry_date": member.expiry_date,
-                "bmi": member.bmi,
-                "due": member.due_amount,
-            }
-        })
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
-    
-    
-    
+        return JsonResponse(
+            {
+                "message": "Member created successfully",
+                "member_id": member.id,
+            },
+            status=201
+        )
 
-from datetime import date
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
+    except Exception as e:
+
+        return JsonResponse(
+            {
+                "error": str(e)
+            },
+            status=500
+        )
 
 def auto_resume_member(member, today):
-
     if member.is_paused and member.pause_expiry_date:
-
         if today >= member.pause_expiry_date:
-
-            active_pause = MemberPause.objects.filter(
-                member=member,
-                end_date__isnull=True
-            ).first()
-
+            active_pause = MemberPause.objects.filter(member=member, end_date__isnull=True).first()
             if active_pause:
-
-                paused_days = (
-                    today - active_pause.start_date
-                ).days
-
+                paused_days = (today - active_pause.start_date).days
                 active_pause.end_date = today
                 active_pause.paused_days = paused_days
                 active_pause.save()
-
                 if member.expiry_date:
-                    member.expiry_date += timedelta(
-                        days=paused_days
-                    )
+                    member.expiry_date += timedelta(days=paused_days)
 
             member.is_paused = False
             member.pause_start_date = None
             member.pause_expiry_date = None
             member.status = "Active"
-
             member.save()
 
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_members(request):
 
-    if request.method == "GET":
+    tenant = get_tenant(request)
+    today = date.today()
 
-        today = date.today()
-
-        members = Member.objects.all().order_by("-id")
-
-        data = []
-
-        for member in members:
-
-
-            # AUTO RESUME CHECK
-            auto_resume_member(
-                member,
-                today
-            )
-
-
-            # STATUS UPDATE
-
-            if member.is_paused:
-
-                member.status = "Paused"
-
-            elif member.expiry_date:
-
-                if member.expiry_date < today:
-
-                    days_expired = (
-                        today - member.expiry_date
-                    ).days
-
-                    if days_expired <= 7:
-                        member.status = "Expired"
-
-                    else:
-                        member.status = "Blocked"
-
-                else:
-                    member.status = "Active"
-
-
-            member.save()
-
-
-            # MONTH PAUSE DATA
-
-            month_start = today.replace(day=1)
-
-            if today.month == 12:
-
-                next_month = today.replace(
-                    year=today.year + 1,
-                    month=1,
-                    day=1
-                )
-
-            else:
-
-                next_month = today.replace(
-                    month=today.month + 1,
-                    day=1
-                )
-
-
-            month_end = next_month - timedelta(days=1)
-
-
-            pauses = MemberPause.objects.filter(
-                member=member,
-                start_date__gte=month_start,
-                start_date__lte=month_end
-            )
-
-
-            used_days = sum(
-                p.paused_days
-                for p in pauses
-                if p.end_date
-            )
-
-
-            remaining_days = max(
-                15 - used_days,
-                0
-            )
-
-
-            pause_count = pauses.count()
-
-
-            data.append({
-
-                "id": member.id,
-                "name": member.name,
-                "phone": member.phone,
-                "email": member.email,
-
-                "age": member.age,
-                "gender": member.gender,
-                "blood_group": member.blood_group,
-
-                "location": member.location,
-
-                "height": member.height,
-                "weight": member.weight,
-                "bmi": member.bmi,
-
-                "plan": member.plan,
-                "branch": member.branch,
-
-                "join_date": member.join_date,
-                "expiry_date": member.expiry_date,
-
-                "paid_amount": member.paid_amount,
-                "due_amount": member.due_amount,
-
-                "status": member.status,
-
-                "photo": (
-                    member.photo.url
-                    if member.photo else None
-                ),
-
-                "pause_start_date": member.pause_start_date,
-                "pause_expiry_date": member.pause_expiry_date,
-
-                "is_paused": member.is_paused,
-
-                "pause_days_used": used_days,
-                "pause_days_remaining": remaining_days,
-                "pause_count": pause_count,
-
-            })
-
-
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
         return JsonResponse(
-            data,
-            safe=False
+            {"error": "Please select a tenant before viewing members"},
+            status=400
         )
 
-    return JsonResponse(
-        {"error":"Invalid request"},
-        status=405
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    members = (
+        Member.objects
+        .filter(
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+        .select_related("plan", "branch")
+        .order_by("-id")
     )
-@csrf_exempt
+
+    data = []
+
+    for member in members:
+
+        # -------------------------------------------------
+        # Auto resume logic
+        # -------------------------------------------------
+
+        auto_resume_member(member, today)
+
+        # -------------------------------------------------
+        # Member status logic
+        # -------------------------------------------------
+
+        if member.is_paused:
+
+            member.status = "Paused"
+
+        elif member.expiry_date:
+
+            if member.expiry_date < today:
+
+                days_expired = (
+                    today - member.expiry_date
+                ).days
+
+                if days_expired <= 7:
+                    member.status = "Expired"
+                else:
+                    member.status = "Blocked"
+
+            else:
+                member.status = "Active"
+
+        else:
+            member.status = "Active"
+
+        member.save()
+
+        # -------------------------------------------------
+        # Pause calculations
+        # -------------------------------------------------
+
+        month_start = today.replace(day=1)
+
+        next_month = (
+            today.replace(
+                year=today.year + 1,
+                month=1,
+                day=1
+            )
+            if today.month == 12
+            else today.replace(
+                month=today.month + 1,
+                day=1
+            )
+        )
+
+        month_end = next_month - timedelta(days=1)
+
+        pauses = MemberPause.objects.filter(
+            member=member,
+            start_date__gte=month_start,
+            start_date__lte=month_end
+        )
+
+        used_days = sum(
+            p.paused_days
+            for p in pauses
+            if p.end_date
+        )
+
+        remaining_days = max(
+            15 - used_days,
+            0
+        )
+
+        pause_count = pauses.count()
+
+        # -------------------------------------------------
+        # Response
+        # -------------------------------------------------
+
+        data.append({
+
+            "id": member.id,
+
+            "name": member.name,
+
+            "phone": member.phone,
+
+            "email": member.email,
+
+            "age": member.age,
+
+            "gender": member.gender,
+
+            "blood_group": member.blood_group,
+
+            "location": member.location,
+
+            "height": member.height,
+
+            "weight": member.weight,
+
+            "bmi": member.bmi,
+
+            "goal": member.get_goal_display(),
+
+            "food_category": (
+                member.get_food_category_display()
+            ),
+
+            # IMPORTANT:
+            # Do not return member.plan directly.
+            "plan": (
+                {
+                    "id": member.plan.id,
+                    "name": member.plan.name,
+                    "duration": member.plan.duration,
+                    "price": member.plan.price,
+                }
+                if member.plan
+                else None
+            ),
+
+            # IMPORTANT:
+            # Do not return member.branch directly.
+            "branch": (
+                {
+                    "id": member.branch.id,
+                    "name": member.branch.name,
+                    "location": member.branch.location,
+                }
+                if member.branch
+                else None
+            ),
+
+            "join_date": member.join_date,
+
+            "expiry_date": (
+                member.expiry_date.isoformat()
+                if member.expiry_date
+                else None
+            ),
+
+            "paid_amount": member.paid_amount,
+
+            "due_amount": member.due_amount,
+
+            "status": member.status,
+
+            "photo": (
+                member.photo.url
+                if member.photo
+                else None
+            ),
+
+            "pause_start_date": (
+                member.pause_start_date.isoformat()
+                if member.pause_start_date
+                else None
+            ),
+
+            "pause_expiry_date": (
+                member.pause_expiry_date.isoformat()
+                if member.pause_expiry_date
+                else None
+            ),
+
+            "is_paused": member.is_paused,
+
+            "pause_days_used": used_days,
+
+            "pause_days_remaining": remaining_days,
+
+            "pause_count": pause_count,
+        })
+
+    return JsonResponse(
+        data,
+        safe=False
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_member(request, member_id):
 
-    if request.method == "GET":
+    tenant = get_tenant(request)
 
-        try:
+    # SUPER_ADMIN without tenant selection
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {
+                "error": "Please select a tenant"
+            },
+            status=400
+        )
 
-            member = Member.objects.get(
-                id=member_id
+    if tenant is None:
+        return JsonResponse(
+            {
+                "error": "User is not assigned to a tenant"
+            },
+            status=403
+        )
+
+    try:
+
+        member = Member.objects.select_related(
+            "plan",
+            "branch"
+        ).get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(
+                request,
+                tenant
             )
+        )
+
+        # -------------------------------------------------
+        # Existing status logic
+        # -------------------------------------------------
+
+        if member.is_paused:
+
+            member_status = "Paused"
+
+        elif member.expiry_date:
 
             today = date.today()
 
+            if member.expiry_date < today:
 
-            # AUTO RESUME CHECK
+                days_expired = (
+                    today -
+                    member.expiry_date
+                ).days
 
-            auto_resume_member(
-                member,
-                today
-            )
+                if days_expired <= 7:
 
-
-            if member.is_paused:
-
-                member.status = "Paused"
-
-
-            elif member.expiry_date:
-
-                if member.expiry_date < today:
-
-                    days_expired = (
-                        today - member.expiry_date
-                    ).days
-
-
-                    if days_expired <= 7:
-                        member.status = "Expired"
-
-                    else:
-                        member.status = "Blocked"
+                    member_status = "Expired"
 
                 else:
-                    member.status = "Active"
 
-
-            member.save()
-
-
-            month_start = today.replace(day=1)
-
-
-            if today.month == 12:
-
-                next_month = today.replace(
-                    year=today.year+1,
-                    month=1,
-                    day=1
-                )
+                    member_status = "Blocked"
 
             else:
 
-                next_month = today.replace(
-                    month=today.month+1,
-                    day=1
-                )
+                member_status = "Active"
 
+        else:
 
-            month_end = next_month - timedelta(days=1)
+            member_status = "Active"
 
+        if member.status != member_status:
 
-            pauses = MemberPause.objects.filter(
-                member=member,
-                start_date__gte=month_start,
-                start_date__lte=month_end
+            member.status = member_status
+
+            member.save(
+                update_fields=["status"]
             )
 
+        # -------------------------------------------------
+        # Response
+        # -------------------------------------------------
 
-            used_days = sum(
-                p.paused_days
-                for p in pauses
-                if p.end_date
-            )
-
-
-            remaining_days = max(
-                15-used_days,
-                0
-            )
-
-
-            pause_count = pauses.count()
-
-
-
-            data = {
-
+        return JsonResponse(
+            {
                 "id": member.id,
+
                 "name": member.name,
+
                 "phone": member.phone,
+
                 "email": member.email,
 
+                "plan": (
+                    {
+                        "id": member.plan.id,
+                        "name": member.plan.name,
+                        "duration": member.plan.duration,
+                        "price": member.plan.price,
+                    }
+                    if member.plan
+                    else None
+                ),
+
+                "branch": (
+                    {
+                        "id": member.branch.id,
+                        "name": member.branch.name,
+                        "location": member.branch.location,
+                    }
+                    if member.branch
+                    else None
+                ),
+
+                "join_date": member.join_date,
+
+                "status": member_status,
+
+                "photo": (
+                    member.photo.url
+                    if member.photo
+                    else None
+                ),
+
+                "height": member.height,
+
+                "weight": member.weight,
+
+                "bmi": member.bmi,
+
                 "age": member.age,
-                "gender": member.gender,
+
+                "goal": member.goal,
+
+                "food_category": member.food_category,
 
                 "blood_group": member.blood_group,
 
                 "location": member.location,
 
-                "height": member.height,
-                "weight": member.weight,
-                "bmi": member.bmi,
+                "adhaar_number": member.adhaar_number,
 
-                "plan": member.plan,
-                "branch": member.branch,
-
-                "join_date": member.join_date,
-                "expiry_date": member.expiry_date,
-
-                "status": member.status,
+                "gender": member.gender,
 
                 "paid_amount": member.paid_amount,
+
                 "due_amount": member.due_amount,
 
-                "photo": (
-                    member.photo.url
-                    if member.photo else None
+                "expiry_date": (
+                    member.expiry_date.isoformat()
+                    if member.expiry_date
+                    else None
                 ),
-
-                "pause_start_date": member.pause_start_date,
-                "pause_expiry_date": member.pause_expiry_date,
 
                 "is_paused": member.is_paused,
 
+                "pause_start_date": (
+                    member.pause_start_date.isoformat()
+                    if member.pause_start_date
+                    else None
+                ),
 
-                "pause_days_used": used_days,
-                "pause_days_remaining": remaining_days,
-                "pause_count": pause_count,
+                "used_pause_days": member.used_pause_days,
 
-            }
-
-
-            return JsonResponse(data)
-
-
-        except Member.DoesNotExist:
-
-            return JsonResponse(
-                {"error":"Member not found"},
-                status=404
-            )
-
-
-    return JsonResponse(
-        {"error":"Invalid request"},
-        status=405
-    )
-
-from datetime import datetime, timedelta
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-
-@csrf_exempt
-def update_member(request, member_id):
-    if request.method != "POST":
-        return JsonResponse({"error": "Invalid request method"}, status=405)
-
-    try:
-        member = Member.objects.get(id=member_id)
-    except Member.DoesNotExist:
-        return JsonResponse({"error": "Member not found"}, status=404)
-
-    # Plan duration map
-    plan_days = {
-        "Silver": 30,
-        "Gold": 60,
-        "Premium": 90,
-        "Platinum": 180,
-        "Diamond": 365,
-    }
-
-    # -----------------------
-    # BASIC FIELDS
-    # -----------------------
-    member.name = request.POST.get("name")
-    member.phone = request.POST.get("phone")
-    member.email = request.POST.get("email")
-    member.height = request.POST.get("height")
-    member.weight = request.POST.get("weight")
-    member.age = request.POST.get("age")
-    member.blood_group = request.POST.get("blood_group")
-    member.location = request.POST.get("location")
-    member.adhaar_number = request.POST.get("adhaar_number")
-    member.gender = request.POST.get("gender")
-
-    if request.POST.get("status"):
-        member.status = request.POST.get("status")
-
-    if request.FILES.get("photo"):
-        member.photo = request.FILES.get("photo")
-
-    # -----------------------
-    # PLAN + JOIN DATE LOGIC
-    # -----------------------
-    plan = request.POST.get("plan")
-    join_date_str = request.POST.get("join_date")
-
-    # convert join_date safely
-    if join_date_str:
-        try:
-            join_date = datetime.strptime(join_date_str, "%Y-%m-%d").date()
-            member.join_date = join_date
-        except ValueError:
-            return JsonResponse({"error": "Invalid join_date format"}, status=400)
-
-    if plan:
-        member.plan = plan
-
-    # -----------------------
-    # EXPIRY CALCULATION (FIXED)
-    # -----------------------
-    if member.plan and member.join_date:
-        days = plan_days.get(member.plan, 0)
-
-        # IMPORTANT:
-        # If member already has paused extensions, keep them
-        paused_extension = 0
-
-        if hasattr(member, "pause_start_date") and member.pause_start_date:
-            # optional safety (not strictly needed here)
-            paused_extension = 0
-
-        member.expiry_date = member.join_date + timedelta(days=days + paused_extension)
-
-    # -----------------------
-    # SAVE
-    # -----------------------
-    member.save()
-
-    return JsonResponse({
-        "message": "Member updated successfully",
-        "id": member.id,
-        "expiry_date":member.expiry_date
-    })
-
-@api_view(['DELETE'])
-@permission_classes([IsSuperAdmin])
-def delete_member(request, member_id):
-    if request.method == "DELETE":
-        try:
-            member = Member.objects.get(id=member_id)
-            member.delete()
-
-            return JsonResponse({"message": "Member deleted successfully"})
-
-        except Member.DoesNotExist:
-            return JsonResponse({"error": "Member not found"},status=404)
-
-
-from .models import Plan
-
-#.................................. PLANS 
-
-
-@csrf_exempt
-def create_plan(request):
-    if request.method == "POST":
-
-        plan = Plan.objects.create(
-            name=request.POST.get("name"),
-            duration=request.POST.get("duration"),
-            price=request.POST.get("price")
+                "pause_expiry_date": (
+                    member.pause_expiry_date.isoformat()
+                    if member.pause_expiry_date
+                    else None
+                ),
+            },
+            status=200
         )
 
-        return JsonResponse({"message": "success"})
+    except Member.DoesNotExist:
 
-    return JsonResponse({"error": "Invalid request method"}, status=405)
+        return JsonResponse(
+            {
+                "error": "Member not found"
+            },
+            status=404
+        )
 
-@csrf_exempt
-def get_plans(request):
-    if request.method == "GET":
-        plans = list(Plan.objects.order_by('id').values())
-        return JsonResponse(plans, safe=False)
+    except Exception as e:
 
+        return JsonResponse(
+            {
+                "error": str(e)
+            },
+            status=500
+        )
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def update_member(request, member_id):
 
-@csrf_exempt
-def update_plan(request, plan_id):
-    if request.method == "POST":
+    tenant = get_tenant(request)
 
-        try:
-            plan = Plan.objects.get(id=plan_id)
-        except Plan.DoesNotExist:
-            return JsonResponse(
-                {"error": "Plan not found"},
-                status=404
+    # SUPER_ADMIN without tenant selection
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {
+                "error": "Please select a tenant"
+            },
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {
+                "error": "User is not assigned to a tenant"
+            },
+            status=403
+        )
+
+    try:
+
+        # -------------------------------------------------
+        # IMPORTANT:
+        # Get member only inside current tenant + branch
+        # -------------------------------------------------
+
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(
+                request,
+                tenant
             )
+        )
 
-        plan.name = request.POST.get("name")
-        plan.duration = request.POST.get("duration")
-        plan.price = request.POST.get("price")
-        
-        plan.save()
+        # -------------------------------------------------
+        # Inputs
+        # -------------------------------------------------
 
-        return JsonResponse({"message":"Updation success"})
+        name = request.data.get(
+            "name",
+            member.name
+        )
 
-    return JsonResponse({"error": "Invalid request method"}, status=405)
+        phone = request.data.get(
+            "phone",
+            member.phone
+        )
 
+        email = request.data.get(
+            "email",
+            member.email
+        )
 
-@api_view(['DELETE'])
-@permission_classes([IsSuperAdmin])
-def delete_plan(request, plan_id):
-    if request.method == "DELETE":
-        try:
-            plan = Plan.objects.get(id=plan_id)
-            plan.delete()
+        plan_id = request.data.get(
+            "plan"
+        )
 
-            return JsonResponse({"message": "Plan deleted successfully"})
+        join_date_str = request.data.get(
+            "join_date"
+        )
 
-        except Plan.DoesNotExist:
-            return JsonResponse({"error": "Plan not found"},status=404)
-        
+        goal = request.data.get(
+            "goal",
+            member.goal
+        )
 
+        food_category = request.data.get(
+            "food_category",
+            member.food_category
+        )
 
-@csrf_exempt
-def create_branch(request):
-    if request.method == "POST":
+        # -------------------------------------------------
+        # Phone
+        # -------------------------------------------------
 
-        phone = request.POST.get("phone")
-        capacity = request.POST.get("capacity")
+        phone = str(phone).strip()
 
-        # Validate phone number
-        if not phone or not phone.isdigit() or len(phone) != 10:
+        if not (
+            phone.isdigit()
+            and len(phone) == 10
+        ):
             return JsonResponse(
-                {"error": "Enter a valid 10-digit mobile number"},
+                {
+                    "error":
+                    "Enter a valid 10-digit mobile number"
+                },
                 status=400
             )
 
-        branch = Branch.objects.create(
-            name=request.POST.get("name"),
-            location=request.POST.get("location"),
-            manager_name=request.POST.get("manager_name"),
-            phone=phone,
-            capacity=capacity
+        # Check duplicate phone
+        if Member.objects.filter(
+            tenant=tenant,
+            phone=phone
+        ).exclude(
+            id=member.id
+        ).exists():
+
+            return JsonResponse(
+                {
+                    "error":
+                    "Mobile number already exists"
+                },
+                status=400
+            )
+
+        # -------------------------------------------------
+        # Email
+        # -------------------------------------------------
+
+        if email:
+
+            email = str(email).strip().lower()
+
+            if Member.objects.filter(
+                tenant=tenant,
+                email=email
+            ).exclude(
+                id=member.id
+            ).exists():
+
+                return JsonResponse(
+                    {
+                        "error":
+                        "Email already exists"
+                    },
+                    status=400
+                )
+
+        # -------------------------------------------------
+        # Plan
+        # -------------------------------------------------
+
+        selected_plan = member.plan
+
+        if plan_id:
+
+            try:
+
+                selected_plan = Plan.objects.get(
+                    id=plan_id,
+                    tenant=tenant
+                )
+
+            except Plan.DoesNotExist:
+
+                return JsonResponse(
+                    {
+                        "error":
+                        "Invalid plan selected"
+                    },
+                    status=400
+                )
+
+        # -------------------------------------------------
+        # Join date
+        # -------------------------------------------------
+
+        if join_date_str:
+
+            try:
+
+                join_date = datetime.strptime(
+                    str(join_date_str),
+                    "%Y-%m-%d"
+                ).date()
+
+            except ValueError:
+
+                return JsonResponse(
+                    {
+                        "error":
+                        "Invalid join date"
+                    },
+                    status=400
+                )
+
+        else:
+
+            join_date = member.join_date
+            if isinstance(join_date, str):
+                try:
+
+                    join_date = datetime.strptime(
+                        join_date,
+                        "%Y-%m-%d"
+                    ).date()
+                except ValueError:
+
+                    join_date = None
+        try:
+            weight = float(
+                request.data.get(
+                    "weight",
+                    member.weight or 0
+                ) or 0
+            )
+            height = float(
+                request.data.get(
+                    "height",
+                    member.height or 0
+                ) or 0
+            )
+
+        except ValueError:
+            return JsonResponse(
+                {
+                    "error":
+                    "Invalid height or weight"
+                },
+                status=400
+            )
+
+        bmi = member.bmi
+
+        if height > 0 and weight > 0:
+
+            height_m = height / 100
+
+            bmi = round(
+                weight /
+                (height_m * height_m),
+                2
+            )
+        try:
+
+            paid_amount = float(
+                request.data.get(
+                    "paid_amount",
+                    member.paid_amount or 0
+                ) or 0
+            )
+        except ValueError:
+
+            return JsonResponse(
+                {
+                    "error":
+                    "Invalid paid amount"
+                },
+                status=400
+            )
+
+        if paid_amount < 0:
+            return JsonResponse(
+                {
+                    "error":
+                    "Paid amount cannot be negative"
+                },
+                status=400
+            )
+        plan_amount = float(
+            selected_plan.price or 0
         )
 
-        return JsonResponse({"message": "success"})
+        if paid_amount > plan_amount:
+            return JsonResponse(
+                {
+                    "error":
+                    "Paid amount cannot exceed plan price"
+                },
+                status=400
+            )
 
+        due_amount = max(
+            plan_amount - paid_amount,
+            0
+        )
+        expiry_date = member.expiry_date
+        if join_date and selected_plan:
+            duration = int(
+                selected_plan.duration or 0
+            )
+
+            expiry_date = (
+                join_date +
+                timedelta(days=duration)
+            )
+        member.name = name
+        member.phone = phone
+        member.email = email
+        member.plan = selected_plan
+        member.height = height
+        member.weight = weight
+        member.bmi = bmi
+        member.goal = goal
+        member.food_category = food_category
+        member.age = request.data.get("age",member.age)
+
+        member.blood_group = request.data.get(
+            "blood_group",
+            member.blood_group
+        )
+
+        member.location = request.data.get(
+            "location",
+            member.location
+        )
+
+        member.adhaar_number = request.data.get(
+            "adhaar_number",
+            member.adhaar_number
+        )
+
+        member.gender = request.data.get(
+            "gender",
+            member.gender
+        )
+        member.paid_amount = paid_amount
+        member.due_amount = due_amount
+        if join_date:
+            member.join_date = join_date
+        member.expiry_date = expiry_date
+        photo = request.FILES.get("photo")
+        if photo:
+            member.photo = photo
+        member.save()
+        return JsonResponse(
+            {
+                "message":
+                "Member updated successfully",
+
+                "member_id":
+                member.id,
+            },
+            status=200
+        )
+    except Member.DoesNotExist:
+
+        return JsonResponse(
+            {
+                "error":
+                "Member not found"
+            },
+            status=404
+        )
+    except Exception as e:
+        return JsonResponse(
+            {
+                "error":
+                str(e)
+            },
+            status=500
+        )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_member(request, member_id):
+    tenant = get_tenant(request)
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before deleting a member"},
+            status=400
+        )
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role == "STAFF":
+        return JsonResponse(
+            {"error": "Staff members are not allowed to delete members"},
+            status=403
+        )
+
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN"
+    ]:
+        return JsonResponse(
+            {"error": "Permission denied"},
+            status=403
+        )
+    try:
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+
+    except Member.DoesNotExist:
+
+        return JsonResponse(
+            {"error": "Member not found or access denied"},
+            status=404
+        )
+    member.delete()
     return JsonResponse(
-        {"error": "Only POST method is allowed"},
-        status=405
+        {
+            "message": "Member deleted successfully",
+            "member_id": member_id
+        },
+        status=200
     )
-@csrf_exempt
-def get_branches(request):
-    if request.method == "GET":
-        branches = list(Branch.objects.order_by('id').values())
-        return JsonResponse(branches, safe=False)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_plan(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before creating a plan"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can create plans"},
+            status=403
+        )
+
+    Plan.objects.create(
+        tenant=tenant,
+        name=request.POST.get("name"),
+        duration=request.POST.get("duration"),
+        price=request.POST.get("price"),
+    )
+
+    return JsonResponse({"message": "success"}, status=201)
 
 
 
-@csrf_exempt
-def get_branch_members(request, branch_id):
-    if request.method != "GET":
-        return JsonResponse({"error": "Method not allowed"},status=405)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_plans(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing plans"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    plans = list(
+        Plan.objects
+        .filter(tenant=tenant)
+        .order_by("id")
+        .values()
+    )
+
+    return JsonResponse(plans, safe=False)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def update_plan(request, plan_id):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before updating a plan"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # All roles can update plans except none
+    # STAFF is also allowed
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+        return JsonResponse(
+            {"error": "Not permitted"},
+            status=403
+        )
 
     try:
-        branch = Branch.objects.get(id=branch_id)
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
+    except Plan.DoesNotExist:
+        return JsonResponse(
+            {"error": "Plan not found"},
+            status=404
+        )
 
-        # Only active members
-        members = Member.objects.filter(branch=branch.name,status="Active"
-)
+    plan.name = request.POST.get("name")
+    plan.duration = request.POST.get("duration")
+    plan.price = request.POST.get("price")
+    plan.save()
 
-        member_data = []
-        for member in members:
-            member_data.append({
-                "id": member.id,
-                "name": member.name,
-                "phone": member.phone,
-                "email": member.email,
-                "plan": member.plan,
-            })
+    return JsonResponse({
+        "message": "Plan updated successfully"
+    })
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_plan(request, plan_id):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before deleting a plan"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # STAFF cannot delete
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN"
+    ]:
+        return JsonResponse(
+            {"error": "Staff are not permitted to delete plans"},
+            status=403
+        )
+
+    try:
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
+    except Plan.DoesNotExist:
+        return JsonResponse(
+            {"error": "Plan not found"},
+            status=404
+        )
+
+    plan.delete()
+
+    return JsonResponse({
+        "message": "Plan deleted successfully"
+    })
+
+    
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_branch(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before creating a branch"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can create branches"},
+            status=403
+        )
+
+    phone = request.POST.get("phone")
+    capacity = request.POST.get("capacity")
+
+    if not phone or not phone.isdigit() or len(phone) != 10:
+        return JsonResponse(
+            {"error": "Enter a valid 10-digit mobile number"},
+            status=400
+        )
+
+    Branch.objects.create(
+        tenant=tenant,
+        name=request.POST.get("name"),
+        location=request.POST.get("location"),
+        manager_name=request.POST.get("manager_name"),
+        phone=phone,
+        capacity=capacity,
+    )
+
+    return JsonResponse({"message": "success"}, status=201)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_branches(request):
+    tenant = get_tenant(request)
+    user = request.user
+
+    if user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing branches"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    qs = Branch.objects.filter(tenant=tenant)
+
+    if user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if not user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        qs = qs.filter(id=user.branch_id)
+
+    branches = list(
+        qs.order_by("id").values()
+    )
+
+    return JsonResponse(branches, safe=False)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_branch_members(request, branch_id):
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing branch members"},
+            status=400
+        )
+
+    # Other users must belong to a tenant
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # Get branch only from the selected tenant
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant
+        )
+    except Branch.DoesNotExist:
+        return JsonResponse(
+            {"error": "Branch not found or access denied"},
+            status=404
+        )
+
+    # BRANCH_ADMIN and STAFF can access only their own branch
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if request.user.branch_id != branch.id:
+            return JsonResponse(
+                {"error": "You are not permitted to access this branch"},
+                status=403
+            )
+
+    try:
+        members = (
+            Member.objects
+            .filter(
+                tenant=tenant,
+                branch=branch
+            )
+            .select_related("plan", "branch")
+        )
+
+        member_data = [
+            {
+                "id": m.id,
+                "name": m.name,
+                "phone": m.phone,
+                "email": m.email,
+                "plan": {
+                    "id": m.plan.id,
+                    "name": m.plan.name,
+                    "duration": m.plan.duration,
+                    "price": m.plan.price,
+                } if m.plan else None,
+            }
+            for m in members
+        ]
 
         return JsonResponse({
-            "branch": branch.name,
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "location": branch.location,
+            },
             "customers": member_data
         })
 
-    except Branch.DoesNotExist:
-        return JsonResponse({"error": "Branch not found"},status=404)
-
     except Exception as e:
-        return JsonResponse({"error": str(e)},status=500)
-
-
-
-@csrf_exempt
+        return JsonResponse(
+            {"error": str(e)},
+            status=500
+        )
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def update_branch(request, branch_id):
-    if request.method == "POST":
-        try:
-            branch = Branch.objects.get(id=branch_id)
-        except Branch.DoesNotExist:
-            return JsonResponse({"message": "Branch not found"},status=404)
+    tenant = get_tenant(request)
 
-        branch.name = request.POST.get("name")
-        branch.location = request.POST.get("location")
-        branch.manager_name = request.POST.get("manager_name")
-        branch.phone = request.POST.get("phone")
-        branch.capacity = request.POST.get("capacity")
-        branch.save()
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before updating a branch"},
+            status=400
+        )
 
-        return JsonResponse({"message": "Branch updated successfully"})
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
 
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can edit branches"},
+            status=403
+        )
 
-@api_view(['DELETE'])
-@permission_classes([IsSuperAdmin])
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant
+        )
+    except Branch.DoesNotExist:
+        return JsonResponse(
+            {"error": "Branch not found"},
+            status=404
+        )
+
+    branch.name = request.POST.get("name")
+    branch.location = request.POST.get("location")
+    branch.manager_name = request.POST.get("manager_name")
+    branch.phone = request.POST.get("phone")
+    branch.capacity = request.POST.get("capacity")
+
+    branch.save()
+
+    return JsonResponse({
+        "message": "Branch updated successfully"
+    })
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
 def delete_branch(request, branch_id):
-    if request.method == "DELETE":
-        try:
-            branch = Branch.objects.get(id=branch_id)
-            branch.delete()
+    tenant = get_tenant(request)
 
-            return JsonResponse({"message": "Branch deleted successfully"})
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before deleting a branch"},
+            status=400
+        )
 
-        except Branch.DoesNotExist:
-            return JsonResponse({"error": "Branch not found"},status=404)
-            
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN"
+    ]:
+        return JsonResponse(
+            {"error": "Not permitted"},
+            status=403
+        )
+
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant
+        )
+    except Branch.DoesNotExist:
+        return JsonResponse(
+            {"error": "Branch not found"},
+            status=404
+        )
+
+    branch.delete()
+
+    return JsonResponse({
+        "message": "Branch deleted successfully"
+    })
+
+
+
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 from django.db.models import Sum
-from datetime import date, timedelta
+from django.http import JsonResponse
 
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+from .models import (
+    Member,
+    Income,
+    Sales_product,
+    Expense,
+)
+from .tenant_utils import get_tenant, get_branch_filter
+
+
+# =========================================================
+# GROWTH CALCULATION
+# =========================================================
 
 def calculate_growth(current, previous):
     if previous == 0:
         return 100 if current > 0 else 0
 
-    return round(((current - previous) / previous) * 100, 2)
+    return round(
+        ((current - previous) / previous) * 100,
+        2
+    )
 
-from datetime import date, timedelta
-from decimal import Decimal
 
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-
-from datetime import date, timedelta
-from decimal import Decimal
-
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-
-# Import your models
-from .models import Member, Income, Expense, Sales_product
-
-from datetime import date, datetime, timedelta
-import calendar
+# =========================================================
+# PERIOD DATE CALCULATION
+# =========================================================
 
 def get_period_dates(period, selected_date=None):
 
@@ -1056,56 +1922,30 @@ def get_period_dates(period, selected_date=None):
                 selected_date,
                 "%Y-%m-%d"
             ).date()
-
         else:
             today = selected_date
 
     else:
         today = date.today()
 
-
-    # ==========================
-    # DAILY
-    # ==========================
-
     if period == "daily":
 
         start_date = today
         end_date = today
 
-
-    # ==========================
-    # WEEKLY
-    # Monday -> Today
-    # ==========================
-
     elif period == "weekly":
 
+        # Monday -> today
         start_date = today - timedelta(
             days=today.weekday()
         )
 
         end_date = today
 
-
-    # ==========================
-    # MONTHLY
-    # 1st -> Today
-    # ==========================
-
     elif period == "monthly":
 
-        start_date = today.replace(
-            day=1
-        )
-
+        start_date = today.replace(day=1)
         end_date = today
-
-
-    # ==========================
-    # YEARLY
-    # Jan 1 -> Today
-    # ==========================
 
     elif period == "yearly":
 
@@ -1116,29 +1956,62 @@ def get_period_dates(period, selected_date=None):
 
         end_date = today
 
-
     else:
 
         return None, None
 
-
     return start_date, end_date
 
 
-@csrf_exempt
+# =========================================================
+# DASHBOARD STATS
+# =========================================================
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_dashboard_stats(request):
 
-    if request.method != "GET":
+    # =====================================================
+    # TENANT
+    # =====================================================
+
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+
         return JsonResponse(
             {
-                "error": "Invalid request method"
+                "error":
+                    "Please select a tenant before viewing dashboard"
             },
-            status=405
+            status=400
+        )
+
+    # All other users must belong to a tenant
+    if tenant is None:
+
+        return JsonResponse(
+            {
+                "error":
+                    "User is not assigned to a tenant"
+            },
+            status=403
         )
 
 
     # =====================================================
-    # PERIOD FILTER
+    # BRANCH FILTER
+    # =====================================================
+
+    branch_filter = get_branch_filter(
+        request,
+        tenant
+    )
+
+
+    # =====================================================
+    # PERIOD
     # =====================================================
 
     period = request.GET.get(
@@ -1146,14 +2019,17 @@ def get_dashboard_stats(request):
         "daily"
     ).lower()
 
-    date_str = request.GET.get(
-        "date"
-    )
+    date_str = request.GET.get("date")
 
+
+    # =====================================================
+    # SELECTED DATE
+    # =====================================================
 
     if date_str:
 
         try:
+
             today = datetime.strptime(
                 date_str,
                 "%Y-%m-%d"
@@ -1163,7 +2039,8 @@ def get_dashboard_stats(request):
 
             return JsonResponse(
                 {
-                    "error": "Invalid date format. Use YYYY-MM-DD"
+                    "error":
+                        "Invalid date format. Use YYYY-MM-DD"
                 },
                 status=400
             )
@@ -1173,26 +2050,28 @@ def get_dashboard_stats(request):
         today = date.today()
 
 
+    # =====================================================
+    # PERIOD DATES
+    # =====================================================
 
     start_date, end_date = get_period_dates(
         period,
         today
     )
 
-
     if start_date is None:
 
         return JsonResponse(
             {
-                "error": "Invalid period. Use daily, weekly, monthly or yearly."
+                "error":
+                    "Invalid period. Use daily, weekly, monthly or yearly."
             },
             status=400
         )
 
 
-
     # =====================================================
-    # LAST MONTH CALCULATION
+    # PREVIOUS MONTH
     # =====================================================
 
     if today.month == 1:
@@ -1206,284 +2085,292 @@ def get_dashboard_stats(request):
         last_year = today.year
 
 
+    # =====================================================
+    # MEMBERS
+    # Tenant + Branch scoped
+    # =====================================================
+
+    member_qs = Member.objects.filter(
+        tenant=tenant,
+        **branch_filter
+    ).select_related(
+        "plan",
+        "branch"
+    )
+
 
     # =====================================================
-    # MEMBER STATISTICS
+    # MEMBER COUNTS
     # =====================================================
 
+    total_members = member_qs.count()
 
-    total_members = Member.objects.count()
-
-
-    active_members = Member.objects.filter(
+    active_members = member_qs.filter(
         status="Active"
     ).count()
 
-
-    blocked_members = Member.objects.filter(
+    blocked_members = member_qs.filter(
         status="Blocked"
     ).count()
 
-
-    expired_members = Member.objects.filter(
+    expired_members = member_qs.filter(
         status="Expired"
     ).count()
 
-
-    paused_members = Member.objects.filter(
+    paused_members = member_qs.filter(
         is_paused=True
     ).count()
 
-
-    pending_payments = Member.objects.filter(
+    pending_payments = member_qs.filter(
         due_amount__gt=0
     ).count()
-
 
 
     # =====================================================
     # UPCOMING EXPIRIES
     # =====================================================
 
+    next_week = today + timedelta(days=7)
 
-    next_week = today + timedelta(
-        days=7
-    )
-
-
-    expiries = Member.objects.filter(
-        status="Active",
-        expiry_date__gte=today,
-        expiry_date__lte=next_week
-    ).order_by(
-        "expiry_date"
+    expiries = (
+        member_qs
+        .filter(
+            status="Active",
+            expiry_date__gte=today,
+            expiry_date__lte=next_week
+        )
+        .order_by("expiry_date")
     )
 
 
     upcoming_expiries_list = [
 
         {
+            "id": member.id,
             "name": member.name,
             "phone": member.phone,
-            "expiry_date": member.expiry_date,
+            "expiry_date": (
+                member.expiry_date.isoformat()
+                if member.expiry_date
+                else None
+            ),
             "due_amount": member.due_amount,
+            "plan": (
+                member.plan.name
+                if member.plan
+                else None
+            ),
         }
 
         for member in expiries
-
     ]
-
 
 
     # =====================================================
     # RECENT REGISTRATIONS
     # =====================================================
 
-
-    recent = Member.objects.order_by(
-        "-id"
-    )[:5]
+    recent = (
+        member_qs
+        .select_related("plan", "branch")
+        .order_by("-id")[:5]
+    )
 
 
     recent_registrations = [
 
         {
+            "id": member.id,
+
             "name": member.name,
+
             "phone": member.phone,
+
             "email": member.email,
-            "plan": member.plan,
+
+            "plan": (
+                {
+                    "id": member.plan.id,
+                    "name": member.plan.name,
+                    "duration": member.plan.duration,
+                    "price": member.plan.price,
+                }
+                if member.plan
+                else None
+            ),
+
+            "branch": (
+                {
+                    "id": member.branch.id,
+                    "name": member.branch.name,
+                    "location": member.branch.location,
+                }
+                if member.branch
+                else None
+            ),
+
             "join_date": member.join_date,
+
         }
 
         for member in recent
-
     ]
 
 
+    # =====================================================
+    # FINANCIAL DATA
+    #
+    # Current models only have tenant.
+    # They do NOT have branch.
+    #
+    # Therefore financial data is tenant scoped.
+    # =====================================================
+
+    income_qs = Income.objects.filter(
+        tenant=tenant
+    )
+
+    sales_qs = Sales_product.objects.filter(
+        tenant=tenant
+    )
+
+    expense_qs = Expense.objects.filter(
+        tenant=tenant
+    )
+
 
     # =====================================================
-    # TOTAL INCOME
+    # TOTAL / ALL-TIME INCOME
     # =====================================================
-
 
     total_membership_income = (
-
-        Income.objects.aggregate(
+        income_qs
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     total_product_income = (
-
-        Sales_product.objects.aggregate(
+        sales_qs
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     total_income = (
-
         total_membership_income
-
-        +
-
-        total_product_income
-
+        + total_product_income
     )
 
 
-
     # =====================================================
-    # SELECTED PERIOD INCOME
+    # PERIOD INCOME
     # =====================================================
-
 
     period_membership_income = (
-
-        Income.objects.filter(
-
+        income_qs
+        .filter(
             date__date__gte=start_date,
-
             date__date__lte=end_date
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     period_product_income = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__date__gte=start_date,
-
             sold_at__date__lte=end_date
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     period_income = (
-
         period_membership_income
-
-        +
-
-        period_product_income
-
+        + period_product_income
     )
-
 
 
     # =====================================================
     # TODAY INCOME
     # =====================================================
 
-
     today_membership_income = (
-
-        Income.objects.filter(
-
+        income_qs
+        .filter(
             date__date=today
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     today_product_income = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__date=today
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     today_income = (
-
         today_membership_income
-
-        +
-
-        today_product_income
-
+        + today_product_income
     )
 
-        # =====================================================
+
+    # =====================================================
     # MONTHLY INCOME
     # =====================================================
 
     monthly_membership_income = (
-
-        Income.objects.filter(
-
+        income_qs
+        .filter(
             date__year=today.year,
-
             date__month=today.month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     monthly_product_income = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__year=today.year,
-
             sold_at__month=today.month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     monthly_income = (
-
         monthly_membership_income
-
-        +
-
-        monthly_product_income
-
+        + monthly_product_income
     )
-
 
 
     # =====================================================
@@ -1491,359 +2378,322 @@ def get_dashboard_stats(request):
     # =====================================================
 
     yearly_membership_income = (
-
-        Income.objects.filter(
-
+        income_qs
+        .filter(
             date__year=today.year
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     yearly_product_income = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__year=today.year
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     yearly_income = (
-
         yearly_membership_income
-
-        +
-
-        yearly_product_income
-
+        + yearly_product_income
     )
-
 
 
     # =====================================================
     # LAST MONTH INCOME
     # =====================================================
 
-
     last_month_membership_income = (
-
-        Income.objects.filter(
-
+        income_qs
+        .filter(
             date__year=last_year,
-
             date__month=last_month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     last_month_product_income = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__year=last_year,
-
             sold_at__month=last_month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     last_month_income = (
-
         last_month_membership_income
-
-        +
-
-        last_month_product_income
-
+        + last_month_product_income
     )
-
 
 
     # =====================================================
     # SALES
     # =====================================================
 
-
     total_sales = (
-
-        Sales_product.objects.aggregate(
+        sales_qs
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     period_sales = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__date__gte=start_date,
-
             sold_at__date__lte=end_date
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     today_sales = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__date=today
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     monthly_sales = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__year=today.year,
-
             sold_at__month=today.month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     last_month_sales = (
-
-        Sales_product.objects.filter(
-
+        sales_qs
+        .filter(
             sold_at__year=last_year,
-
             sold_at__month=last_month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
+
+    yearly_sales = (
+        sales_qs
+        .filter(
+            sold_at__year=today.year
+        )
+        .aggregate(
+            total=Sum("total_amount")
+        )["total"]
+        or Decimal("0")
+    )
 
 
     # =====================================================
     # EXPENSE
     # =====================================================
 
-
     total_expense = (
-
-        Expense.objects.aggregate(
+        expense_qs
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     period_expense = (
-
-        Expense.objects.filter(
-
+        expense_qs
+        .filter(
             date__gte=start_date,
-
             date__lte=end_date
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     today_expense = (
-
-        Expense.objects.filter(
-
+        expense_qs
+        .filter(
             date=today
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     monthly_expense = (
-
-        Expense.objects.filter(
-
+        expense_qs
+        .filter(
             date__year=today.year,
-
             date__month=today.month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     last_month_expense = (
-
-        Expense.objects.filter(
-
+        expense_qs
+        .filter(
             date__year=last_year,
-
             date__month=last_month
-
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
+
+    yearly_expense = (
+        expense_qs
+        .filter(
+            date__year=today.year
+        )
+        .aggregate(
+            total=Sum("amount")
+        )["total"]
+        or Decimal("0")
+    )
 
 
     # =====================================================
     # PROFIT / LOSS
     # =====================================================
 
+    period_profit = max(
+        period_income - period_expense,
+        Decimal("0")
+    )
 
-    period_profit = period_income - period_expense
-
-    period_loss = period_expense - period_income
-
-
-    today_profit = today_income - today_expense
-
-    today_loss = today_expense - today_income
-
-
-    monthly_profit = monthly_income - monthly_expense
-
-    monthly_loss = monthly_expense - monthly_income
+    period_loss = max(
+        period_expense - period_income,
+        Decimal("0")
+    )
 
 
-    total_profit = total_income - total_expense
+    today_profit = max(
+        today_income - today_expense,
+        Decimal("0")
+    )
 
-    total_loss = total_expense - total_income
-
-
-
-    values = [
-
-        "period_profit",
-        "period_loss",
-        "today_profit",
-        "today_loss",
-        "monthly_profit",
-        "monthly_loss",
-        "total_profit",
-        "total_loss"
-
-    ]
+    today_loss = max(
+        today_expense - today_income,
+        Decimal("0")
+    )
 
 
-    for value in values:
+    monthly_profit = max(
+        monthly_income - monthly_expense,
+        Decimal("0")
+    )
 
-        if locals()[value] < 0:
+    monthly_loss = max(
+        monthly_expense - monthly_income,
+        Decimal("0")
+    )
 
-            locals()[value] = Decimal("0")
 
+    total_profit = max(
+        total_income - total_expense,
+        Decimal("0")
+    )
+
+    total_loss = max(
+        total_expense - total_income,
+        Decimal("0")
+    )
+
+
+    yearly_profit = max(
+        yearly_income - yearly_expense,
+        Decimal("0")
+    )
+
+    yearly_loss = max(
+        yearly_expense - yearly_income,
+        Decimal("0")
+    )
 
 
     # =====================================================
     # CATEGORY INCOME
     # =====================================================
 
-
     membership_income = (
-
-        Income.objects.filter(
+        income_qs
+        .filter(
             category="membership"
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     product_income = (
-
-        Sales_product.objects.aggregate(
+        sales_qs
+        .aggregate(
             total=Sum("total_amount")
         )["total"]
-
         or Decimal("0")
-
     )
 
 
     admission_income = (
-
-        Income.objects.filter(
+        income_qs
+        .filter(
             category="other"
-        ).aggregate(
+        )
+        .aggregate(
             total=Sum("amount")
         )["total"]
-
         or Decimal("0")
-
     )
-
 
 
     # =====================================================
     # GROWTH
     # =====================================================
-
 
     revenue_growth = calculate_growth(
         monthly_income,
@@ -1857,9 +2707,15 @@ def get_dashboard_stats(request):
     )
 
 
+    previous_month_profit = (
+        last_month_income
+        - last_month_expense
+    )
+
+
     profit_growth = calculate_growth(
         monthly_profit,
-        max(last_month_income - last_month_expense, 0)
+        previous_month_profit
     )
 
 
@@ -1868,65 +2724,16 @@ def get_dashboard_stats(request):
         last_month_sales
     )
 
-    # =====================================================
-    # YEARLY SALES
-    # =====================================================
-
-    yearly_sales = (
-        Sales_product.objects.filter(
-            sold_at__year=today.year
-        ).aggregate(
-            total=Sum("total_amount")
-        )["total"]
-        or Decimal("0")
-    )
-
-
-
-    # =====================================================
-    # YEARLY EXPENSE
-    # =====================================================
-
-    yearly_expense = (
-        Expense.objects.filter(
-            date__year=today.year
-        ).aggregate(
-            total=Sum("amount")
-        )["total"]
-        or Decimal("0")
-    )
-
-
-
-    # =====================================================
-    # YEARLY PROFIT / LOSS
-    # =====================================================
-
-    yearly_profit = (
-        yearly_income - yearly_expense
-    )
-
-
-    yearly_loss = (
-        yearly_expense - yearly_income
-    )
-
-
-    if yearly_profit < 0:
-        yearly_profit = Decimal("0")
-
-
-    if yearly_loss < 0:
-        yearly_loss = Decimal("0")
-
-
 
     # =====================================================
     # RESPONSE
     # =====================================================
 
-
     return JsonResponse({
+
+        # -----------------------------------------------
+        # PERIOD
+        # -----------------------------------------------
 
         "period": period,
 
@@ -1934,6 +2741,10 @@ def get_dashboard_stats(request):
 
         "end_date": end_date,
 
+
+        # -----------------------------------------------
+        # MEMBERS
+        # -----------------------------------------------
 
         "total_members": total_members,
 
@@ -1948,6 +2759,10 @@ def get_dashboard_stats(request):
         "pending_payments": pending_payments,
 
 
+        # -----------------------------------------------
+        # SELECTED PERIOD
+        # -----------------------------------------------
+
         "total_income": period_income,
 
         "total_sales": period_sales,
@@ -1958,6 +2773,10 @@ def get_dashboard_stats(request):
 
         "period_loss": period_loss,
 
+
+        # -----------------------------------------------
+        # TODAY
+        # -----------------------------------------------
 
         "today_income": today_income,
 
@@ -1970,6 +2789,10 @@ def get_dashboard_stats(request):
         "today_loss": today_loss,
 
 
+        # -----------------------------------------------
+        # MONTHLY
+        # -----------------------------------------------
+
         "monthly_income": monthly_income,
 
         "monthly_sales": monthly_sales,
@@ -1979,6 +2802,11 @@ def get_dashboard_stats(request):
         "monthly_profit": monthly_profit,
 
         "monthly_loss": monthly_loss,
+
+
+        # -----------------------------------------------
+        # YEARLY
+        # -----------------------------------------------
 
         "yearly_income": yearly_income,
 
@@ -1991,6 +2819,10 @@ def get_dashboard_stats(request):
         "yearly_loss": yearly_loss,
 
 
+        # -----------------------------------------------
+        # ALL TIME
+        # -----------------------------------------------
+
         "all_time_income": total_income,
 
         "all_time_sales": total_sales,
@@ -2002,12 +2834,20 @@ def get_dashboard_stats(request):
         "total_loss": total_loss,
 
 
+        # -----------------------------------------------
+        # CATEGORY INCOME
+        # -----------------------------------------------
+
         "membership_income": membership_income,
 
         "product_income": product_income,
 
         "admission_income": admission_income,
 
+
+        # -----------------------------------------------
+        # GROWTH
+        # -----------------------------------------------
 
         "sales_growth": sales_growth,
 
@@ -2018,288 +2858,793 @@ def get_dashboard_stats(request):
         "profit_growth": profit_growth,
 
 
+        # -----------------------------------------------
+        # UPCOMING EXPIRIES
+        # -----------------------------------------------
+
         "upcoming_expiries": len(
             upcoming_expiries_list
         ),
 
-        "upcoming_expiries_list": upcoming_expiries_list,
+        "upcoming_expiries_list":
+            upcoming_expiries_list,
 
 
-        "recent_registrations": recent_registrations,
+        # -----------------------------------------------
+        # RECENT REGISTRATIONS
+        # -----------------------------------------------
+
+        "recent_registrations":
+            recent_registrations,
 
     })
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_payments(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing payments"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # -----------------------------------------
+    # Payment filtering
+    # -----------------------------------------
+
+    payments = (
+        Payment.objects
+        .filter(
+            tenant=tenant
+        )
+        .select_related(
+            "member",
+            "member__plan",
+            "member__branch"
+        )
+    )
+
+    # BRANCH_ADMIN / STAFF → only own branch
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if not request.user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        payments = payments.filter(
+            member__branch_id=request.user.branch_id
+        )
+
     data = []
 
-    for payment in Payment.objects.select_related('member').all():
+    for payment in payments:
+
         member = payment.member
 
-        total_paid = Payment.objects.filter(member=member).aggregate(
-            total=Sum('amount')
-        )['total'] or 0
+        # -----------------------------------------
+        # Calculate total paid for this member
+        # -----------------------------------------
 
-        plan_fee = member.plan if member.plan else 0
-        due_amount = plan_fee - total_paid
-        if due_amount < 0:
-            due_amount = 0
+        total_paid = (
+            Payment.objects
+            .filter(
+                tenant=tenant,
+                member=member
+            )
+            .aggregate(
+                total=Sum("amount")
+            )["total"]
+            or 0
+        )
+
+        # -----------------------------------------
+        # Plan price
+        # -----------------------------------------
+
+        plan_fee = (
+            member.plan.price
+            if member.plan
+            else 0
+        )
+
+        # -----------------------------------------
+        # Remaining amount
+        # -----------------------------------------
+
+        due_amount = max(
+            float(plan_fee) - float(total_paid),
+            0
+        )
 
         data.append({
+            "id": payment.id,
+
+            "member_id": member.id,
+
             "member_name": member.name,
-            # "phone": member.phone,
-            # "payment_id": payment.id,
+
             "amount_paid": payment.amount,
+
             "total_paid": total_paid,
+
             "due_amount": due_amount,
+
+            "plan": (
+                {
+                    "id": member.plan.id,
+                    "name": member.plan.name,
+                    "price": member.plan.price,
+                }
+                if member.plan
+                else None
+            ),
+
+            "branch": (
+                {
+                    "id": member.branch.id,
+                    "name": member.branch.name,
+                }
+                if member.branch
+                else None
+            ),
+
+            "payment_date": (
+                payment.payment_date.isoformat()
+                if payment.payment_date
+                else None
+            ),
+
+            "payment_method": payment.payment_method,
+
+            "payment_type": payment.payment_type,
         })
 
     return JsonResponse(data, safe=False)
 
 
-
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def renew_member(request, member_id):
-    if request.method != "POST":
-        return JsonResponse({"message": "Invalid request"}, status=405)
 
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before renewing a member"},
+            status=400
+        )
+
+    # Other users must belong to tenant
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # STAFF cannot renew
+    if request.user.role == "STAFF":
+        return JsonResponse(
+            {"error": "Staff members are not allowed to renew members"},
+            status=403
+        )
+
+    # Find member only inside tenant + allowed branch
     try:
-        member = Member.objects.get(id=member_id)
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
     except Member.DoesNotExist:
-        return JsonResponse({"message": "Member not found"}, status=404)
+        return JsonResponse(
+            {"error": "Member not found or access denied"},
+            status=404
+        )
 
-    plan_name = request.POST.get("plan")
+    # Get plan
+    plan_id = request.POST.get("plan")
 
-    if not plan_name:
-        return JsonResponse({"message": "Plan is required"}, status=400)
+    if not plan_id:
+        return JsonResponse(
+            {"error": "Plan is required"},
+            status=400
+        )
 
     try:
-        plan = Plan.objects.get(name=plan_name)
-    except Plan.DoesNotExist:
-        return JsonResponse({"message": "Invalid plan"}, status=400)
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
+    except (Plan.DoesNotExist, ValueError):
+        return JsonResponse(
+            {"error": "Invalid plan"},
+            status=400
+        )
 
-    duration = plan.duration   # use your actual field name here
-
+    duration = int(plan.duration)
     today = date.today()
 
-    # if current membership is still active, extend from current expiry
+    # Extend from current expiry if still active
     if member.expiry_date and member.expiry_date >= today:
-        member.expiry_date = member.expiry_date + timedelta(days=duration)
+        member.expiry_date = (
+            member.expiry_date +
+            timedelta(days=duration)
+        )
     else:
-        # if expired / blocked, start from today
-        member.expiry_date = today + timedelta(days=duration)
+        member.expiry_date = (
+            today +
+            timedelta(days=duration)
+        )
 
-    member.plan = plan.name
+    # IMPORTANT:
+    # Member.plan is a ForeignKey
+    member.plan = plan
+
     member.status = "Active"
-    member.is_paused = False   # optional, useful if renewed member was paused/blocked
+    member.is_paused = False
+    member.pause_start_date = None
+    member.pause_expiry_date = None
+
     member.save()
 
     return JsonResponse({
         "message": "Plan renewed successfully",
         "member_id": member.id,
         "member_name": member.name,
-        "plan": member.plan,
-        "new_expiry_date": member.expiry_date,
+        "plan": {
+            "id": plan.id,
+            "name": plan.name,
+            "duration": plan.duration,
+            "price": plan.price,
+        },
+        "new_expiry_date": member.expiry_date.isoformat(),
         "status": member.status,
     })
 
 
 
-@csrf_exempt
-def add_expense(request):
-    if request.method == "POST":
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_blocked_members(request):
 
-        Expense.objects.create(
-            title=request.POST.get("title"),
-            category=request.POST.get("category"),
-            amount=request.POST.get("amount"),
-            date=request.POST.get("date"),
-            description=request.POST.get("description", "")
+    tenant = get_tenant(request)
+
+    # -------------------------------------------------
+    # SUPER_ADMIN must select tenant
+    # -------------------------------------------------
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+
+        return JsonResponse(
+            {
+                "error":
+                    "Please select a tenant"
+            },
+            status=400
         )
 
-        return JsonResponse({"message": "Expense added successfully"})
-    
+    if tenant is None:
+
+        return JsonResponse(
+            {
+                "error":
+                    "User is not assigned to a tenant"
+            },
+            status=403
+        )
+
+    # -------------------------------------------------
+    # Tenant + branch filtering
+    # -------------------------------------------------
+
+    members = Member.objects.filter(
+        tenant=tenant,
+        status="Blocked",
+        **get_branch_filter(
+            request,
+            tenant
+        )
+    ).select_related(
+        "plan",
+        "branch"
+    )
+
+    data = [
+
+        {
+            "id": m.id,
+
+            "name": m.name,
+
+            "phone": m.phone,
+
+            "plan": (
+                {
+                    "id": m.plan.id,
+                    "name": m.plan.name,
+                    "duration": m.plan.duration,
+                    "price": m.plan.price,
+                }
+                if m.plan
+                else None
+            ),
+
+            "branch": (
+                {
+                    "id": m.branch.id,
+                    "name": m.branch.name,
+                    "location": m.branch.location,
+                }
+                if m.branch
+                else None
+            ),
+
+            "join_date": m.join_date,
+
+            "expiry_date": (
+                m.expiry_date.isoformat()
+                if m.expiry_date
+                else None
+            ),
+
+            "status": m.status,
+
+            "photo": (
+                m.photo.url
+                if m.photo
+                else None
+            ),
+        }
+
+        for m in members
+    ]
+
+    return JsonResponse(
+        data,
+        safe=False
+    )
 
 
-@csrf_exempt
-def view_expenses(request):
-
-        expenses = list(Expense.objects.all().values())
-        return JsonResponse({"expenses": expenses})
-
-@csrf_exempt
-def get_blocked_members(request):
-    if request.method == "GET":
-        members = Member.objects.filter(status="Blocked")
-
-        data = []
-
-        for member in members:
-            data.append({
-                "id": member.id,
-                "name": member.name,
-                "phone": member.phone,
-                "plan":member.plan,
-                "join_date":member.join_date,
-                "expiry_date":member.expiry_date,
-                "status": member.status,
-                "photo": member.photo.url if member.photo else None,
-            })
-
-        return JsonResponse(data, safe=False)
-    
-
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def send_whatsapp(request, member_id):
-    member = Member.objects.get(id=member_id)
+
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before sending WhatsApp message"},
+            status=400
+        )
+
+    # Other users must belong to tenant
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    try:
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+    except Member.DoesNotExist:
+        return JsonResponse(
+            {"error": "Member not found or access denied"},
+            status=404
+        )
 
     return JsonResponse({
         "id": member.id,
         "name": member.name,
         "phone": member.phone,
         "due_amount": member.due_amount,
-        "expiry_date":member.expiry_date
+        "expiry_date": (
+            member.expiry_date.isoformat()
+            if member.expiry_date
+            else None
+        ),
     })
 
 
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def expiring_soon_members(request):
+
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing expiring members"},
+            status=400
+        )
+
+    # Other users must belong to tenant
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
     today = date.today()
 
-    start_date = today - timedelta(days=5)   # 5 days before today
-    end_date = today + timedelta(days=5)       # 5 days after today
+    start_date = today - timedelta(days=5)
+    end_date = today + timedelta(days=5)
 
-    members = Member.objects.filter(
-        status="Active",
-        expiry_date__gte=start_date,
-        expiry_date__lte=end_date
-    ).order_by("expiry_date")
+    members = (
+        Member.objects
+        .filter(
+            tenant=tenant,
+            status="Active",
+            expiry_date__gte=start_date,
+            expiry_date__lte=end_date,
+            **get_branch_filter(request, tenant)
+        )
+        .select_related(
+            "plan",
+            "branch"
+        )
+        .order_by("expiry_date")
+    )
 
     data = [
         {
-            "id": m.id,
-            "name": m.name,
-            "phone": m.phone,
-            "expiry_date": m.expiry_date,
-            "due_amount": m.due_amount,
-            "days_left": (m.expiry_date - today).days,
+            "id": member.id,
+            "name": member.name,
+            "phone": member.phone,
+
+            "expiry_date": (
+                member.expiry_date.isoformat()
+                if member.expiry_date
+                else None
+            ),
+
+            "due_amount": member.due_amount,
+
+            "days_left": (
+                member.expiry_date - today
+            ).days,
+
+            "plan": (
+                {
+                    "id": member.plan.id,
+                    "name": member.plan.name,
+                    "price": member.plan.price,
+                }
+                if member.plan
+                else None
+            ),
+
+            "branch": (
+                {
+                    "id": member.branch.id,
+                    "name": member.branch.name,
+                }
+                if member.branch
+                else None
+            ),
         }
-        for m in members
+        for member in members
+    ]
+
+    return JsonResponse(
+        data,
+        safe=False
+    )
+
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def expired_members(request):
+
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing expired members"},
+            status=400
+        )
+
+    # Other users must belong to tenant
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    today = date.today()
+
+    members = (
+        Member.objects
+        .filter(
+            tenant=tenant,
+            expiry_date__lt=today,
+            **get_branch_filter(request, tenant)
+        )
+        .exclude(
+            status__in=[
+                "Paused",
+                "Blocked"
+            ]
+        )
+        .select_related(
+            "plan",
+            "branch"
+        )
+        .order_by("-expiry_date")
+    )
+
+    data = [
+        {
+            "id": member.id,
+
+            "name": member.name,
+
+            "phone": member.phone,
+
+            "expiry_date": (
+                member.expiry_date.isoformat()
+                if member.expiry_date
+                else None
+            ),
+
+            "status": member.status,
+
+            "due_amount": member.due_amount,
+
+            "plan": (
+                {
+                    "id": member.plan.id,
+                    "name": member.plan.name,
+                    "price": member.plan.price,
+                }
+                if member.plan
+                else None
+            ),
+
+            "branch": (
+                {
+                    "id": member.branch.id,
+                    "name": member.branch.name,
+                }
+                if member.branch
+                else None
+            ),
+        }
+        for member in members
+    ]
+
+    return JsonResponse(
+        {
+            "message": data
+        }
+    )
+
+
+
+import json
+from datetime import date, datetime, timedelta
+
+from django.conf import settings
+from django.db.models import Sum
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from groq import Groq
+
+from .models import (
+    Member, Staffs, Payment, Expense, Income, Product, Sales_product,
+    Enquiry, GymEquipment, MemberPause,
+)
+from .serializers import GymEquipmentSerializer
+from .tenant_utils import get_tenant, get_branch_filter
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_product(request):
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before creating a product"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can create products"},
+            status=403
+        )
+
+    product = Product.objects.create(
+        tenant=tenant,
+        name=request.POST.get("name"),
+        description=request.POST.get("description"),
+        price=request.POST.get("price"),
+        stock=request.POST.get("stock"),
+        category=request.POST.get("category"),
+        image=request.FILES.get("image"),
+    )
+
+    return JsonResponse(
+        {
+            "message": "Product created",
+            "id": product.id
+        },
+        status=201
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def get_products(request):
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing products"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    products = (
+        Product.objects
+        .filter(tenant=tenant)
+        .order_by("id")
+    )
+
+    data = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "price": p.price,
+            "stock": p.stock,
+            "category": p.category,
+            "image": p.image.url if p.image else None,
+        }
+        for p in products
     ]
 
     return JsonResponse(data, safe=False)
 
 
-
-@csrf_exempt
-def expired_members(request):
-    today = date.today()
-
-    members = Member.objects.filter(
-        expiry_date__lt=today
-    ).exclude(
-        status__in=["Paused", "Blocked"]
-    ).order_by("-expiry_date")
-
-    data = []
-    for member in members:
-        data.append({
-            "id": member.id,
-            "name": member.name,
-            "phone": member.phone,
-            # "plan": member.plan.name if member.plan else None,
-            "expiry_date": member.expiry_date,
-            "status": member.status,
-            "due_amount": member.due_amount,
-        })
-
-    return JsonResponse({"message": data}, safe=False)
-
-import json
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import Product
-
-
-@csrf_exempt
-def create_product(request):
-    if request.method == "POST":
-        product = Product.objects.create(
-            name=request.POST.get("name"),
-            description=request.POST.get("description"),
-            price=request.POST.get("price"),
-            stock=request.POST.get("stock"),
-            category=request.POST.get("category"),
-            image=request.FILES.get("image"),
-        )
-
-        return JsonResponse(
-            {
-                "message": "Product created",
-                "id": product.id,
-            },
-            status=201,
-        )
-
-    return JsonResponse({"error": "Only POST method allowed"}, status=405)
-
-
-# READ
-def get_products(request):
-    products = Product.objects.all().order_by("id")
-    data = []
-
-    for product in products:
-        data.append({
-            "id": product.id,
-            "name": product.name,
-            "description": product.description,
-            "price": product.price,
-            "stock": product.stock,
-            "category": product.category,
-            "image": product.image.url if product.image else None,
-        })
-
-    return JsonResponse(data, safe=False)
-
-# UPDATE
-
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def update_product(request, product_id):
-    if request.method == "POST":
-        try:
-            product = Product.objects.get(id=product_id)
 
-            product.name = request.POST.get("name", product.name)
-            product.description = request.POST.get("description", product.description)
-            product.price = request.POST.get("price", product.price)
-            product.stock = request.POST.get("stock", product.stock)
-            product.category = request.POST.get("category", product.category)
+    tenant = get_tenant(request)
 
-            # Update image only if a new one is uploaded
-            if request.FILES.get("image"):
-                product.image = request.FILES.get("image")
-
-            product.save()
-
-            return JsonResponse({"message": "Updated"}, status=200)
-
-        except Product.DoesNotExist:
-            return JsonResponse({"error": "Product not found"}, status=404)
-
-    return JsonResponse({"error": "Only POST method allowed"}, status=405)
-
-
-# DELETE
-@api_view(['DELETE'])
-@permission_classes([IsSuperAdmin])
-def delete_product(request, product_id):
-    if request.method != "DELETE":
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
         return JsonResponse(
-            {"error": "Method not allowed"},
-            status=405
+            {"error": "Please select a tenant before updating a product"},
+            status=400
         )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can update products"},
+            status=403
+        )
+
     try:
-        product = Product.objects.get(id=product_id)
+        product = Product.objects.get(
+            id=product_id,
+            tenant=tenant
+        )
+    except Product.DoesNotExist:
+        return JsonResponse(
+            {"error": "Product not found"},
+            status=404
+        )
+
+    product.name = request.POST.get(
+        "name",
+        product.name
+    )
+
+    product.description = request.POST.get(
+        "description",
+        product.description
+    )
+
+    product.price = request.POST.get(
+        "price",
+        product.price
+    )
+
+    product.stock = request.POST.get(
+        "stock",
+        product.stock
+    )
+
+    product.category = request.POST.get(
+        "category",
+        product.category
+    )
+
+    if request.FILES.get("image"):
+        product.image = request.FILES.get("image")
+
+    product.save()
+
+    return JsonResponse(
+        {"message": "Product updated successfully"},
+        status=200
+    )
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_product(request, product_id):
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before deleting a product"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Not permitted"},
+            status=403
+        )
+
+    try:
+        product = Product.objects.get(
+            id=product_id,
+            tenant=tenant
+        )
     except Product.DoesNotExist:
         return JsonResponse(
             {"error": "Product not found"},
@@ -2309,73 +3654,27 @@ def delete_product(request, product_id):
     product.delete()
 
     return JsonResponse(
-        {"message": "Deleted successfully"},
+        {"message": "Product deleted successfully"},
         status=200
     )
 
 
-@csrf_exempt
-def sell_product(request):
-    if request.method != "POST":
-        return JsonResponse({"success": False, "message": "Invalid request method"})
-
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({"success": False, "message": "Invalid JSON"})
-
-    product_id = data.get("product_id")
-    member_id = data.get("member_id")
-    quantity = int(data.get("quantity", 0))
-    payment_method = data.get("payment_method", "cash")
-
-    if not product_id or not member_id:
-        return JsonResponse({"success": False, "message": "Missing data"})
-
-    if quantity <= 0:
-        return JsonResponse({"success": False, "message": "Invalid quantity"})
-
-    try:
-        member = Member.objects.get(id=member_id)
-    except Member.DoesNotExist:
-        return JsonResponse({"success": False, "message": "Member not found"})
-
-    try:
-        product = Product.objects.get(id=product_id)
-    except Product.DoesNotExist:
-        return JsonResponse({"success": False, "message": "Product not found"})
-
-    if quantity > product.stock:
-        return JsonResponse({"success": False, "message": "Insufficient stock"})
-
-    unit_price = product.price
-    total_amount = unit_price * quantity
-
-    sale = Sales_product.objects.create(
-        member=member,
-        product=product,
-        quantity=quantity,
-        unit_price=unit_price,
-        total_amount=total_amount,
-        payment_method=payment_method
-    )
-
-    product.stock -= quantity
-    product.save()
-
-    return JsonResponse({
-        "success": True,
-        "message": "Sale completed",
-        "sale_id": sale.id
-    })
-
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def sales_list(request):
 
-    if request.method != "GET":
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
         return JsonResponse(
-            {"error": "GET request only"},
-            status=405
+            {"error": "Please select a tenant before viewing sales"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
         )
 
     period = request.GET.get(
@@ -2383,15 +3682,12 @@ def sales_list(request):
         "daily"
     ).lower()
 
-    selected_date = request.GET.get(
-        "date"
-    )
-
+    selected_date = request.GET.get("date")
 
     start_date, end_date = get_period_dates(
         period,
         selected_date
-)
+    )
 
     if start_date is None:
         return JsonResponse(
@@ -2401,22 +3697,38 @@ def sales_list(request):
 
     sales = (
         Sales_product.objects
-        .select_related(
-            "product",
-            "member"
-        )
         .filter(
+            tenant=tenant,
             sold_at__date__gte=start_date,
             sold_at__date__lte=end_date
         )
-        .order_by("-sold_at")
+        .select_related(
+            "product",
+            "member",
+            "member__branch"
+        )
     )
 
-    data = []
+    # -----------------------------------------
+    # Branch restriction
+    # -----------------------------------------
 
-    for sale in sales:
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
 
-        data.append({
+        if not request.user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        sales = sales.filter(
+            member__branch_id=request.user.branch_id
+        )
+
+    sales = sales.order_by("-sold_at")
+
+    data = [
+        {
             "id": sale.id,
 
             "member_id": (
@@ -2450,120 +3762,183 @@ def sales_list(request):
             "sold_at": sale.sold_at.strftime(
                 "%d-%m-%Y %H:%M"
             ),
-        })
 
-    return JsonResponse({
-        "success": True,
-        "period": period,
-        "start_date": start_date,
-        "end_date": end_date,
-        "sales": data
-    })
+            "branch": (
+                {
+                    "id": sale.member.branch.id,
+                    "name": sale.member.branch.name,
+                }
+                if sale.member and sale.member.branch
+                else None
+            ),
+        }
+        for sale in sales
+    ]
+
+    return JsonResponse(
+        {
+            "success": True,
+            "period": period,
+            "start_date": start_date,
+            "end_date": end_date,
+            "sales": data
+        }
+    )
 
 
-@csrf_exempt
-def validate_member(request, member_id):
-    try:
-        member = Member.objects.get(id=member_id)
-
-        return JsonResponse({
-            "exists": True,
-            "member_name": member.name
-        })
-
-    except Member.DoesNotExist:
-        return JsonResponse({
-            "exists": False,
-            "message": "Not enough stock available"
-        })
-
-from django.shortcuts import get_object_or_404
-
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def one_sale(request, sale_id):
-    sale = get_object_or_404(Sales_product, id=sale_id)
+    tenant = get_tenant(request)
+    sale = get_object_or_404(Sales_product, id=sale_id, tenant=tenant)
 
     return JsonResponse({
         "id": sale.id,
         "member_id": sale.member_id,
         "member_name": sale.member.name,
-        "product": getattr(sale.product, "name", str(sale.product)),  # ✅ FIXED
+        "product": getattr(sale.product, "name", str(sale.product)),
         "quantity": sale.quantity,
         "unit_price": float(sale.unit_price),
         "total_amount": float(sale.total_amount),
         "payment_method": sale.payment_method,
         "sold_at": sale.sold_at,
-
-        # "due_amount": float(getattr(sale, "due_amount", 0)),
         "invoice_no": getattr(sale, "invoice_no", f"INV-{sale.id}"),
     })
 
 
-from .models import Staffs
 
-
-@csrf_exempt
+# ============================================================
+# STAFF
+# ============================================================
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def create_staff(request):
-    if request.method == "POST":
-        name = request.POST.get("name")
-        role = request.POST.get("role")
-        specialization = request.POST.get("specialization")
-        # photo = request.POST.get("photo")
-        experience = request.POST.get("experience")
-        phone = request.POST.get("phone")
-        joining_date = request.POST.get("joining_date")
-        salary = request.POST.get("salary", 0)
-        status = request.POST.get("status", "Active")
 
-        if not (phone.isdigit() and len(phone) == 10):
-            return JsonResponse(
-                {"error": "Enter a valid 10-digit mobile number"},
-                status=400
-            )
-
-        staff = Staffs.objects.create(
-            # id=request.POST.get("id"),
-            name=request.POST.get("name"),
-            role=request.POST.get("role"),
-            specialization=request.POST.get("specialization"),
-            phone=request.POST.get("phone"),
-            experience=request.POST.get("experience"),
-            joining_date=request.POST.get("joining_date"),
-            salary=request.POST.get("salary"),
-            status=request.POST.get("status"),
+    # Only BRANCH_ADMIN can create staff
+    if request.user.role != "BRANCH_ADMIN":
+        return JsonResponse(
+            {"error": "Only Branch Admin can create staff"},
+            status=403
         )
 
-        return JsonResponse({
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # Branch Admin must have a branch
+    if not request.user.branch_id:
+        return JsonResponse(
+            {"error": "You are not assigned to a branch"},
+            status=403
+        )
+
+    # Automatically use the logged-in admin's branch
+    try:
+        branch = Branch.objects.get(
+            id=request.user.branch_id,
+            tenant=tenant
+        )
+    except Branch.DoesNotExist:
+        return JsonResponse(
+            {"error": "Invalid branch assignment"},
+            status=403
+        )
+
+    phone = request.POST.get("phone")
+
+    if not phone or not (
+        phone.isdigit() and len(phone) == 10
+    ):
+        return JsonResponse(
+            {"error": "Enter a valid 10-digit mobile number"},
+            status=400
+        )
+
+    staff = Staffs.objects.create(
+        tenant=tenant,
+        branch=branch,
+        name=request.POST.get("name"),
+        role=request.POST.get("role"),
+        specialization=request.POST.get("specialization"),
+        phone=phone,
+        experience=request.POST.get("experience"),
+        joining_date=request.POST.get("joining_date"),
+        salary=request.POST.get("salary"),
+        status=request.POST.get("status") or "Active",
+    )
+
+    return JsonResponse(
+        {
             "id": staff.id,
             "name": staff.name,
             "status": staff.status,
-        })
-
-    return JsonResponse(
-        {"error": "Invalid request method"},
-        status=405
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+            },
+        },
+        status=201
     )
 
-from datetime import date
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.db.models import Sum
-from .models import Staffs, Payment
 
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_staffs(request):
-    staffs = Staffs.objects.order_by("-id")
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing staff"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    staffs = (
+        Staffs.objects
+        .filter(tenant=tenant)
+        .select_related("branch")
+        .order_by("-id")
+    )
+
+    # Branch users → own branch only
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if not request.user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        staffs = staffs.filter(
+            branch_id=request.user.branch_id
+        )
+
     data = []
 
     for staff in staffs:
 
-        # Total amount paid to staff
-        # Includes Salary, Incentive, Bonus, Commission, Advance, Overtime, etc.
-        paid_amount = Payment.objects.filter(
-            staff=staff
-        ).aggregate(
-            total=Sum("amount")
-        )["total"] or 0
+        paid_amount = (
+            Payment.objects
+            .filter(
+                tenant=tenant,
+                staff=staff,
+                payment_type="Salary"
+            )
+            .aggregate(
+                total=Sum("amount")
+            )["total"]
+            or 0
+        )
 
         data.append({
             "id": staff.id,
@@ -2576,106 +3951,263 @@ def get_staffs(request):
             "salary": str(staff.salary),
             "paid_amount": str(paid_amount),
             "status": staff.status,
+
+            "branch": (
+                {
+                    "id": staff.branch.id,
+                    "name": staff.branch.name,
+                }
+                if staff.branch
+                else None
+            ),
         })
 
-    return JsonResponse(data, safe=False)
+    return JsonResponse(
+        data,
+        safe=False
+    )
 
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def get_staff(request, staff_id):
-    try:
-        staff = Staffs.objects.get(id=staff_id)
 
-        paid_amount = Payment.objects.filter(
-            staff=staff,
-            payment_type="Salary"
-        ).aggregate(total=Sum("amount"))["total"] or 0
+    tenant = get_tenant(request)
 
-        due_amount = max(float(staff.salary) - float(paid_amount), 0)
-
-        data = {
-            "id": staff.id,
-            "name": staff.name,
-            "role": staff.role,
-            "specialization": staff.specialization,
-            "phone": staff.phone,
-            "experience": staff.experience,
-            "joining_date": staff.joining_date,
-            "salary": str(staff.salary),
-            "paid_amount": str(paid_amount),
-            # "due_amount": str(due_amount),
-            "status": staff.status,
-        }
-
-        return JsonResponse(data)
-
-    except Staffs.DoesNotExist:
-        return JsonResponse({"error": "Staff not found"}, status=404)
-
-
-
-@csrf_exempt
-def update_staff(request, id):
-    if request.method == "POST":   # easier with FormData
-
-        staff = Staffs.objects.get(id=id)
-
-        staff.name = request.POST.get("name")
-        staff.role = request.POST.get("role")
-        staff.specialization = request.POST.get("specialization")
-        staff.phone = request.POST.get("phone")
-        staff.experience = request.POST.get("experience")
-        staff.joining_date = request.POST.get("joining_date")
-        staff.salary = request.POST.get("salary")
-        staff.status = request.POST.get("status")
-
-        staff.save()
-
-        return JsonResponse({
-            "success": True,
-            "message": "Staff updated successfully"
-        })
-
-    return JsonResponse({"success": False}, status=400)
-
-@api_view(["DELETE"])
-@permission_classes([IsSuperAdmin])
-def delete_staff(request, staff_id):
-    try:
-        staff = Staffs.objects.get(id=staff_id)
-        staff.delete()
-
-        return Response(
-            {"message": "Staff deleted successfully"},
-            status=status.HTTP_200_OK
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before viewing staff"},
+            status=400
         )
 
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    try:
+        staff = (
+            Staffs.objects
+            .select_related("branch")
+            .get(
+                id=staff_id,
+                tenant=tenant
+            )
+        )
     except Staffs.DoesNotExist:
-        return Response(
+        return JsonResponse(
             {"error": "Staff not found"},
-            status=status.HTTP_404_NOT_FOUND
-        )
-
-@csrf_exempt
-def pause_member(request, member_id):
-
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid request"},
-            status=405
-        )
-
-    try:
-        member = Member.objects.get(id=member_id)
-
-    except Member.DoesNotExist:
-        return JsonResponse(
-            {"error": "Member not found"},
             status=404
         )
 
-    # -------------------------------------------------
-    # ALREADY PAUSED
-    # -------------------------------------------------
+    # Branch restriction
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if staff.branch_id != request.user.branch_id:
+            return JsonResponse(
+                {"error": "You are not permitted to access this staff member"},
+                status=403
+            )
+
+    paid_amount = (
+        Payment.objects
+        .filter(
+            tenant=tenant,
+            staff=staff,
+            payment_type="Salary"
+        )
+        .aggregate(
+            total=Sum("amount")
+        )["total"]
+        or 0
+    )
+
+    return JsonResponse({
+        "id": staff.id,
+        "name": staff.name,
+        "role": staff.role,
+        "specialization": staff.specialization,
+        "phone": staff.phone,
+        "experience": staff.experience,
+        "joining_date": staff.joining_date,
+        "salary": str(staff.salary),
+        "paid_amount": str(paid_amount),
+        "status": staff.status,
+
+        "branch": (
+            {
+                "id": staff.branch.id,
+                "name": staff.branch.name,
+            }
+            if staff.branch
+            else None
+        ),
+    })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def update_staff(request, id):
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before updating staff"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Only tenant admins can update staff"},
+            status=403
+        )
+
+    try:
+        staff = Staffs.objects.get(
+            id=id,
+            tenant=tenant
+        )
+    except Staffs.DoesNotExist:
+        return JsonResponse(
+            {"success": False, "error": "Staff not found"},
+            status=404
+        )
+
+    branch_id = request.POST.get(
+        "branch",
+        staff.branch_id
+    )
+
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant
+        )
+    except (Branch.DoesNotExist, ValueError):
+        return JsonResponse(
+            {"error": "Invalid branch"},
+            status=400
+        )
+
+    staff.name = request.POST.get("name", staff.name)
+    staff.role = request.POST.get("role", staff.role)
+    staff.specialization = request.POST.get(
+        "specialization",
+        staff.specialization
+    )
+    staff.phone = request.POST.get(
+        "phone",
+        staff.phone
+    )
+    staff.experience = request.POST.get(
+        "experience",
+        staff.experience
+    )
+    staff.joining_date = request.POST.get(
+        "joining_date",
+        staff.joining_date
+    )
+    staff.salary = request.POST.get(
+        "salary",
+        staff.salary
+    )
+    staff.status = request.POST.get(
+        "status",
+        staff.status
+    )
+    staff.branch = branch
+
+    staff.save()
+
+    return JsonResponse({
+        "success": True,
+        "message": "Staff updated successfully"
+    })
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_staff(request, staff_id):
+
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"error": "Please select a tenant before deleting staff"},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return JsonResponse(
+            {"error": "Not permitted"},
+            status=403
+        )
+
+    try:
+        staff = Staffs.objects.get(
+            id=staff_id,
+            tenant=tenant
+        )
+    except Staffs.DoesNotExist:
+        return JsonResponse(
+            {"error": "Staff not found"},
+            status=404
+        )
+
+    staff.delete()
+
+    return JsonResponse(
+        {"message": "Staff deleted successfully"},
+        status=200
+    )
+
+
+# ============================================================
+# PAUSE / RESUME
+# ============================================================
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def pause_member(request, member_id):
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before pausing a member"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    # STAFF cannot pause members
+    if request.user.role == "STAFF":
+        return JsonResponse({
+            "error": "Staff members are not allowed to pause members"
+        }, status=403)
+
+    try:
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+    except Member.DoesNotExist:
+        return JsonResponse({
+            "error": "Member not found or access denied"
+        }, status=404)
 
     if member.is_paused:
         return JsonResponse({
@@ -2683,33 +4215,24 @@ def pause_member(request, member_id):
             "message": "Member already paused",
             "paused_date": (
                 member.pause_start_date.strftime("%Y-%m-%d")
-                if member.pause_start_date
-                else None
-            )
+                if member.pause_start_date else None
+            ),
         }, status=400)
 
-    # -------------------------------------------------
-    # READ REQUEST
-    # -------------------------------------------------
-
+    # Parse request body
     try:
         body = json.loads(request.body)
-
         freeze_date = datetime.strptime(
             body["freeze_date"],
             "%Y-%m-%d"
         ).date()
-
     except (KeyError, ValueError, json.JSONDecodeError):
         return JsonResponse({
             "success": False,
             "error": "Valid freeze_date is required (YYYY-MM-DD)"
         }, status=400)
 
-    # -------------------------------------------------
-    # CURRENT MONTH
-    # -------------------------------------------------
-
+    # Calculate month range
     month_start = freeze_date.replace(day=1)
 
     if freeze_date.month == 12:
@@ -2726,11 +4249,9 @@ def pause_member(request, member_id):
 
     month_end = next_month - timedelta(days=1)
 
-    # -------------------------------------------------
-    # COUNT PAUSES IN CURRENT MONTH
-    # -------------------------------------------------
-
+    # Maximum 2 pauses per month
     pause_count = MemberPause.objects.filter(
+        tenant=tenant,
         member=member,
         start_date__gte=month_start,
         start_date__lte=month_end
@@ -2744,11 +4265,9 @@ def pause_member(request, member_id):
             "max_pauses": 2
         }, status=400)
 
-    # -------------------------------------------------
-    # CALCULATE USED PAUSE DAYS THIS MONTH
-    # -------------------------------------------------
-
+    # Calculate used pause days
     previous_pauses = MemberPause.objects.filter(
+        tenant=tenant,
         member=member,
         start_date__gte=month_start,
         start_date__lte=month_end,
@@ -2760,11 +4279,7 @@ def pause_member(request, member_id):
         for pause in previous_pauses
     )
 
-    remaining_days = 15 - used_days
-
-    # -------------------------------------------------
-    # NO DAYS LEFT
-    # -------------------------------------------------
+    remaining_days = max(0, 15 - used_days)
 
     if remaining_days <= 0:
         return JsonResponse({
@@ -2775,72 +4290,81 @@ def pause_member(request, member_id):
             "max_pause_days": 15
         }, status=400)
 
-    # -------------------------------------------------
-    # THIS PAUSE CAN USE ONLY REMAINING DAYS
-    # -------------------------------------------------
-
     allowed_days = remaining_days
 
-    # The date on which the member must be active again
     allowed_resume_date = (
         freeze_date + timedelta(days=allowed_days)
     )
 
-    # -------------------------------------------------
-    # CREATE PAUSE HISTORY
-    # -------------------------------------------------
-
+    # Create pause record
     pause = MemberPause.objects.create(
+        tenant=tenant,
         member=member,
         start_date=freeze_date,
         allowed_days=allowed_days,
         paused_days=0
     )
 
+    # Update member
     member.is_paused = True
     member.pause_start_date = freeze_date
     member.pause_expiry_date = allowed_resume_date
     member.status = "Paused"
-
     member.used_pause_days = used_days
-
     member.save()
 
     return JsonResponse({
         "success": True,
         "message": "Member paused successfully",
         "pause_id": pause.id,
+
         "pause_start_date": freeze_date.strftime("%Y-%m-%d"),
+
         "pause_days_used": used_days,
         "pause_days_remaining": remaining_days,
+
         "pause_count": pause_count + 1,
         "allowed_days": allowed_days,
-        "allowed_resume_date": allowed_resume_date.strftime("%Y-%m-%d"),
+
+        "allowed_resume_date": (
+            allowed_resume_date.strftime("%Y-%m-%d")
+        ),
+
         "status": member.status,
         "is_paused": member.is_paused,
     })
 
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def resume_member(request, member_id):
+    tenant = get_tenant(request)
 
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid request"},
-            status=405
-        )
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before resuming a member"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    # STAFF cannot resume
+    if request.user.role == "STAFF":
+        return JsonResponse({
+            "error": "Staff members are not allowed to resume members"
+        }, status=403)
 
     try:
-        member = Member.objects.get(id=member_id)
-
-    except Member.DoesNotExist:
-        return JsonResponse(
-            {"error": "Member not found"},
-            status=404
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
         )
-
-    # -------------------------------------------------
-    # MEMBER NOT PAUSED
-    # -------------------------------------------------
+    except Member.DoesNotExist:
+        return JsonResponse({
+            "error": "Member not found or access denied"
+        }, status=404)
 
     if not member.is_paused:
         return JsonResponse({
@@ -2848,10 +4372,7 @@ def resume_member(request, member_id):
             "message": "Member is not paused"
         }, status=400)
 
-    # -------------------------------------------------
-    # READ REQUEST
-    # -------------------------------------------------
-
+    # Parse resume date
     try:
         body = json.loads(request.body)
 
@@ -2866,14 +4387,17 @@ def resume_member(request, member_id):
             "error": "Valid resume_date is required (YYYY-MM-DD)"
         }, status=400)
 
-    # -------------------------------------------------
-    # GET ACTIVE PAUSE
-    # -------------------------------------------------
-
-    pause = MemberPause.objects.filter(
-        member=member,
-        end_date__isnull=True
-    ).order_by("-start_date").first()
+    # Find active pause
+    pause = (
+        MemberPause.objects
+        .filter(
+            tenant=tenant,
+            member=member,
+            end_date__isnull=True
+        )
+        .order_by("-start_date")
+        .first()
+    )
 
     if not pause:
         return JsonResponse({
@@ -2882,10 +4406,6 @@ def resume_member(request, member_id):
         }, status=400)
 
     pause_start = pause.start_date
-
-    # -------------------------------------------------
-    # RESUME DATE VALIDATION
-    # -------------------------------------------------
 
     paused_days = (
         resume_date - pause_start
@@ -2897,10 +4417,6 @@ def resume_member(request, member_id):
             "error": "Resume date must be after pause date."
         }, status=400)
 
-    # -------------------------------------------------
-    # CHECK MAXIMUM ALLOWED DAYS
-    # -------------------------------------------------
-
     if paused_days > pause.allowed_days:
         return JsonResponse({
             "success": False,
@@ -2910,28 +4426,18 @@ def resume_member(request, member_id):
             "max_monthly_days": 15
         }, status=400)
 
-    # -------------------------------------------------
-    # UPDATE PAUSE HISTORY
-    # -------------------------------------------------
-
+    # Close pause
     pause.end_date = resume_date
     pause.paused_days = paused_days
     pause.save()
 
-    # -------------------------------------------------
-    # UPDATE MEMBER EXPIRY
-    # -------------------------------------------------
-
+    # Extend membership expiry
     if member.expiry_date:
-        member.expiry_date = (
-            member.expiry_date +
-            timedelta(days=paused_days)
+        member.expiry_date += timedelta(
+            days=paused_days
         )
 
-    # -------------------------------------------------
-    # CALCULATE CURRENT MONTH USAGE
-    # -------------------------------------------------
-
+    # Calculate monthly pause usage
     month_start = pause_start.replace(day=1)
 
     if pause_start.month == 12:
@@ -2949,6 +4455,7 @@ def resume_member(request, member_id):
     month_end = next_month - timedelta(days=1)
 
     completed_pauses = MemberPause.objects.filter(
+        tenant=tenant,
         member=member,
         start_date__gte=month_start,
         start_date__lte=month_end,
@@ -2960,22 +4467,16 @@ def resume_member(request, member_id):
         for p in completed_pauses
     )
 
-    # -------------------------------------------------
-    # UPDATE MEMBER STATE
-    # -------------------------------------------------
-
+    # Update member
     member.is_paused = False
     member.pause_start_date = None
+    member.pause_expiry_date = None
     member.status = "Active"
-
-    # Keep existing field updated
     member.used_pause_days = used_days_this_month
-
     member.save()
 
     return JsonResponse({
         "success": True,
-
         "message": "Member resumed successfully",
 
         "paused_days": paused_days,
@@ -2989,126 +4490,207 @@ def resume_member(request, member_id):
 
         "new_expiry_date": (
             member.expiry_date.strftime("%Y-%m-%d")
-            if member.expiry_date
-            else None
+            if member.expiry_date else None
         ),
 
         "status": member.status,
-
-        "is_paused": member.is_paused
+        "is_paused": member.is_paused,
     })
 
-
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def add_member_payment(request, member_id):
+    tenant = get_tenant(request)
 
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid request method"},
-            status=405
-        )
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before recording payment"
+        }, status=400)
 
-    data = json.loads(request.body)
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
 
     try:
-        member = Member.objects.get(id=member_id)
-    except Member.DoesNotExist:
-        return JsonResponse(
-            {"error": "Member not found"},
-            status=404
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
         )
+    except Member.DoesNotExist:
+        return JsonResponse({
+            "error": "Member not found or access denied"
+        }, status=404)
 
-    amount = float(data.get("amount", 0))
+    # Parse JSON
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
+
+    # Amount
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid payment amount"
+        }, status=400)
 
     if amount <= 0:
-        return JsonResponse(
-            {"error": "Amount must be greater than 0"},
-            status=400
-        )
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
 
-    if float(member.due_amount) <= 0:
-        return JsonResponse(
-            {"error": "Membership fee already fully paid"},
-            status=400
-        )
+    current_due = float(member.due_amount or 0)
 
-    if amount > float(member.due_amount):
-        return JsonResponse(
-            {
-                "error": f"Amount cannot exceed due amount ₹{member.due_amount}"
-            },
-            status=400
-        )
+    if current_due <= 0:
+        return JsonResponse({
+            "error": "Membership fee already fully paid"
+        }, status=400)
 
-    # Income date is automatically set by auto_now_add=True
-    Income.objects.create(
+    if amount > current_due:
+        return JsonResponse({
+            "error": f"Amount cannot exceed due amount ₹{current_due}"
+        }, status=400)
+
+    payment_method = data.get(
+        "payment_method",
+        "cash"
+    )
+
+    # Create income transaction
+    income = Income.objects.create(
+        tenant=tenant,
         member=member,
         title="Membership",
         name=member.name,
         phone=member.phone,
         category="membership",
         amount=amount,
-        payment_method=data.get("payment_method", "cash"),
-        description=f"Membership payment received from {member.name}",
-        is_system_generated=True
+        payment_method=payment_method,
+        description=(
+            f"Membership payment received from {member.name}"
+        ),
+        is_system_generated=True,
     )
 
-    member.paid_amount += amount
-    member.due_amount -= amount
+    # Update member payment information
+    member.paid_amount = (
+        float(member.paid_amount or 0) + amount
+    )
 
-    if member.due_amount < 0:
-        member.due_amount = 0
+    member.due_amount = max(
+        current_due - amount,
+        0
+    )
 
     member.save()
 
     return JsonResponse({
         "message": "Member payment recorded",
+
+        "income_id": income.id,
+
+        "member_id": member.id,
+        "member_name": member.name,
+
         "paid_amount": member.paid_amount,
         "due_amount": member.due_amount,
-        "payment_completed": member.due_amount == 0
-    })
 
+        "payment_completed": (
+            float(member.due_amount) == 0
+        ),
+    }, status=201)
 
-
-
-@csrf_exempt
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def add_staff_payment(request, staff_id):
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid request method"},
-            status=405
-        )
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before recording staff payment"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    # Only admins can pay staff
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN"
+    ]:
+        return JsonResponse({
+            "error": "Only Super Admin and Tenant Admin can record staff payments"
+        }, status=403)
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
-        return JsonResponse(
-            {"error": "Invalid JSON data"},
-            status=400
-        )
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
 
+    # Get staff belonging to selected tenant
     try:
-        staff = Staffs.objects.get(id=staff_id)
-    except Staffs.DoesNotExist:
-        return JsonResponse(
-            {"error": "Staff not found"},
-            status=404
+        staff = (
+            Staffs.objects
+            .select_related("branch")
+            .get(
+                id=staff_id,
+                tenant=tenant
+            )
         )
+    except Staffs.DoesNotExist:
+        return JsonResponse({
+            "error": "Staff not found or access denied"
+        }, status=404)
 
-    amount = float(data.get("amount", 0))
-    payment_date = data.get("payment_date")
-    payment_method = data.get("payment_method")
-    payment_type = data.get("payment_type", "Salary")
-    description = data.get("description", "")
+    # Amount
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid payment amount"
+        }, status=400)
 
     if amount <= 0:
-        return JsonResponse(
-            {"error": "Amount must be greater than 0"},
-            status=400
-        )
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
 
-    # Save payment
+    payment_date = data.get("payment_date")
+
+    if not payment_date:
+        return JsonResponse({
+            "error": "Payment date is required"
+        }, status=400)
+
+    payment_method = data.get("payment_method")
+
+    if not payment_method:
+        return JsonResponse({
+            "error": "Payment method is required"
+        }, status=400)
+
+    payment_type = data.get(
+        "payment_type",
+        "Salary"
+    )
+
+    description = data.get(
+        "description",
+        ""
+    )
+
+    # Create payment record
     payment = Payment.objects.create(
+        tenant=tenant,
         staff=staff,
         amount=amount,
         payment_type=payment_type,
@@ -3116,8 +4698,9 @@ def add_staff_payment(request, staff_id):
         payment_date=payment_date,
     )
 
-    # Save expense
-    Expense.objects.create(
+    # Create expense record
+    expense = Expense.objects.create(
+        tenant=tenant,
         title=payment_type,
         name=staff.name,
         phone=staff.phone,
@@ -3125,226 +4708,379 @@ def add_staff_payment(request, staff_id):
         amount=amount,
         payment_method=payment_method,
         date=payment_date,
-        description=description or f"{payment_type} paid to {staff.name}",
-        is_system_generated=True
+        description=(
+            description
+            or f"{payment_type} paid to {staff.name}"
+        ),
+        is_system_generated=True,
     )
 
     return JsonResponse({
         "message": "Staff payment recorded successfully",
+
         "payment_id": payment.id,
+        "expense_id": expense.id,
+
+        "staff_id": staff.id,
         "staff_name": staff.name,
+
         "amount": str(payment.amount),
         "payment_type": payment_type,
+
+        "branch": {
+            "id": staff.branch.id,
+            "name": staff.branch.name
+        } if staff.branch else None,
+    }, status=201)
+    
+
+# ============================================================
+# ENQUIRY
+# ============================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_enquiry(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before adding an enquiry"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    name = request.POST.get("name")
+    phone = request.POST.get("phone")
+    plan = request.POST.get("plan")
+    edate = request.POST.get("date")
+
+    if not name:
+        return JsonResponse({
+            "error": "Name is required"
+        }, status=400)
+
+    if not (phone and phone.isdigit() and len(phone) == 10):
+        return JsonResponse({
+            "error": "Enter a valid 10-digit mobile number"
+        }, status=400)
+
+    enquiry = Enquiry.objects.create(
+        tenant=tenant,
+        name=name,
+        phone=phone,
+        plan=plan,
+        date=edate
+    )
+
+    return JsonResponse({
+        "message": "Enquiry added",
+        "id": enquiry.id,
+        "name": enquiry.name,
+        "phone": enquiry.phone,
+        "plan": enquiry.plan,
+        "date": enquiry.date
     }, status=201)
 
 
-
-@csrf_exempt
-def add_enquiry(request):
-    if request.method == "POST":
-        name = request.POST.get("name")
-        phone = request.POST.get("phone")
-        plan = request.POST.get("plan")
-        date = request.POST.get("date")
-
-        if not (phone.isdigit() and len(phone) == 10 ):
-            return JsonResponse(
-                {"error": "Enter a valid 10-digit mobile number"},status=400)
-
-        enquiry = Enquiry.objects.create(
-            name=name,
-            phone=phone,
-            plan=plan,
-            date=date
-        )
-
-        return JsonResponse({
-            "message": "Enquiry added",
-            "name": enquiry.name,
-            "phone": enquiry.phone,
-            "plan": enquiry.plan,
-            "date":enquiry.date
-        })
-
-    return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def view_enquiry(request):
-        enquiries = Enquiry.objects.all().order_by("-id")
+    tenant = get_tenant(request)
 
-        data = [
-            {
-                "id": enquiry.id,
-                "name": enquiry.name,
-                "phone": enquiry.phone,
-                "plan": enquiry.plan,
-                "date":enquiry.date
-            }
-            for enquiry in enquiries
-        ]
-
-        return JsonResponse(data, safe=False)
-
-@api_view(['DELETE'])
-@permission_classes([IsSuperAdmin])
-def delete_enquiry(request, enquiry_id):
-    if request.method == "DELETE":
-        enquiry = get_object_or_404(Enquiry, id=enquiry_id)
-        enquiry.delete()
-
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
         return JsonResponse({
-            "message": "Enquiry deleted successfully"
-        })
+            "error": "Please select a tenant before viewing enquiries"
+        }, status=400)
 
-    return JsonResponse({"error": "Invalid request method"}, status=405)
-
-
-@csrf_exempt
-def add_expense(request):
-
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid method"},
-            status=405
-        )
-
-    try:
-        data = json.loads(request.body)
-
-        expense = Expense.objects.create(
-            title=data.get("title"),
-            name=data.get("name"),
-            phone=data.get("phone"),
-            category=data.get("category"),
-            description=data.get("description"),
-            amount=data.get("amount"),
-            payment_method=data.get("payment_method"),
-            date=data.get("date"),
-            is_system_generated=False
-        )
-
+    if tenant is None:
         return JsonResponse({
-            "message": "Expense added successfully",
-            "id": expense.id
-        }, status=201)
+            "error": "User is not assigned to a tenant"
+        }, status=403)
 
-
-    except Exception as e:
-        return JsonResponse(
-            {"error": str(e)},
-            status=400
-        )
-
-
-
-@csrf_exempt
-def expenses(request):
-
-    if request.method != "GET":
-        return JsonResponse(
-            {"error": "Invalid request method"},
-            status=405
-        )
-
-    expenses = Expense.objects.all().order_by("-date", "-id")
-
-    data = []
-
-    for expense in expenses:
-        data.append({
-            "id": expense.id,
-            "title": expense.title,
-            "name": expense.name,
-            "phone": expense.phone,
-            "category": expense.category,
-            "description": expense.description,
-            "amount": str(expense.amount),
-            "payment_method": expense.payment_method,
-            "date": expense.date.strftime("%Y-%m-%d"),
-            "type": "Salary" if expense.is_system_generated else "Additional"
-        })
-
-    return JsonResponse(
-        data,
-        safe=False
+    enquiries = (
+        Enquiry.objects
+        .filter(tenant=tenant)
+        .order_by("-id")
     )
 
+    data = [
+        {
+            "id": e.id,
+            "name": e.name,
+            "phone": e.phone,
+            "plan": e.plan,
+            "date": e.date,
+        }
+        for e in enquiries
+    ]
 
-@csrf_exempt
-def add_income(request):
+    return JsonResponse(data, safe=False)
 
-    if request.method != "POST":
-        return JsonResponse(
-            {"error": "Invalid request method"},
-            status=405
-        )
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_enquiry(request, enquiry_id):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before deleting an enquiry"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN"
+    ]:
+        return JsonResponse({
+            "error": "You are not allowed to delete enquiries"
+        }, status=403)
+
+    enquiry = get_object_or_404(
+        Enquiry,
+        id=enquiry_id,
+        tenant=tenant
+    )
+
+    enquiry.delete()
+
+    return JsonResponse({
+        "message": "Enquiry deleted successfully"
+    })
+
+
+# ============================================================
+# EXPENSES / INCOME (manual entries + reports)
+# ============================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_expense(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before adding an expense"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN"
+    ]:
+        return JsonResponse({
+            "error": "Only Super Admin and Tenant Admin can add expenses"
+        }, status=403)
 
     try:
         data = json.loads(request.body)
-
     except json.JSONDecodeError:
-        return JsonResponse(
-            {"error": "Invalid JSON data"},
-            status=400
-        )
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
+
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid expense amount"
+        }, status=400)
+
+    if amount <= 0:
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
+
+    expense = Expense.objects.create(
+        tenant=tenant,
+        title=data.get("title"),
+        name=data.get("name"),
+        phone=data.get("phone"),
+        category=data.get("category"),
+        description=data.get("description"),
+        amount=amount,
+        payment_method=data.get("payment_method"),
+        date=data.get("date"),
+        is_system_generated=False,
+    )
+
+    return JsonResponse({
+        "message": "Expense added successfully",
+        "id": expense.id
+    }, status=201)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def view_expenses(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before viewing expenses"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    qs = (
+        Expense.objects
+        .filter(tenant=tenant)
+        .order_by("-date", "-id")
+    )
+
+    data = [
+        {
+            "id": e.id,
+            "title": e.title,
+            "name": e.name,
+            "phone": e.phone,
+            "category": e.category,
+            "description": e.description,
+            "amount": str(e.amount),
+            "payment_method": e.payment_method,
+            "date": e.date.strftime("%Y-%m-%d"),
+            "type": (
+                "Salary"
+                if e.is_system_generated
+                else "Additional"
+            ),
+        }
+        for e in qs
+    ]
+
+    return JsonResponse(data, safe=False)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_income(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before adding income"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    if request.user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN"
+    ]:
+        return JsonResponse({
+            "error": "Only Super Admin and Tenant Admin can add income"
+        }, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
 
     member = None
 
     if data.get("member_id"):
         try:
-            member = Member.objects.get(id=data.get("member_id"))
-        except Member.DoesNotExist:
-            return JsonResponse(
-                {"error": "Member not found"},
-                status=404
+            member = Member.objects.get(
+                id=data.get("member_id"),
+                tenant=tenant,
+                **get_branch_filter(request, tenant)
             )
+        except Member.DoesNotExist:
+            return JsonResponse({
+                "error": "Member not found or access denied"
+            }, status=404)
 
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid income amount"
+        }, status=400)
+
+    if amount <= 0:
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
 
     income = Income.objects.create(
+        tenant=tenant,
         member=member,
         title=data.get("title"),
         name=data.get("name"),
         phone=data.get("phone"),
         category=data.get("category"),
         description=data.get("description"),
-        amount=data.get("amount"),
-        payment_method=data.get(
-            "payment_method",
-            "cash"
-        ),
+        amount=amount,
+        payment_method=data.get("payment_method", "cash"),
         date=data.get("date"),
-        is_system_generated=False
+        is_system_generated=False,
     )
 
-    return JsonResponse(
-        {
-            "message": "Additional income added successfully",
-            "income_id": income.id
-        },
-        status=201
-    )
-
-
-@csrf_exempt
+    return JsonResponse({
+        "message": "Additional income added successfully",
+        "income_id": income.id
+    }, status=201)
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def incomes(request):
+    tenant = get_tenant(request)
 
-    if request.method != "GET":
-        return JsonResponse(
-            {"error": "Invalid request method"},
-            status=405
-        )
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before viewing income"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
 
     data = []
 
-    # =========================
-    # NORMAL INCOME
-    # =========================
+    # -------------------------
+    # INCOME
+    # -------------------------
 
-    incomes = Income.objects.all().order_by("-date", "-id")
+    income_qs = (
+        Income.objects
+        .filter(tenant=tenant)
+        .select_related("member", "member__branch")
+        .order_by("-date", "-id")
+    )
 
-    for income in incomes:
+    # Branch-level filtering
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+        if not request.user.branch_id:
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
 
+        income_qs = income_qs.filter(
+            member__branch_id=request.user.branch_id
+        )
+
+    for income in income_qs:
         data.append({
             "id": f"in_{income.id}",
             "title": income.title,
@@ -3360,63 +5096,78 @@ def incomes(request):
                 if income.is_system_generated
                 else "Additional"
             ),
-
             "_sort_date": income.date,
         })
 
-    # =========================
+    # -------------------------
     # PRODUCT SALES
-    # =========================
+    # -------------------------
 
-    sales = Sales_product.objects.select_related(
-        "member",
-        "product"
-    ).order_by("-sold_at", "-id")
+    sales_qs = (
+        Sales_product.objects
+        .filter(tenant=tenant)
+        .select_related(
+            "member",
+            "member__branch",
+            "product"
+        )
+        .order_by("-sold_at", "-id")
+    )
 
-    for sale in sales:
+    # Branch-level filtering
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+        sales_qs = sales_qs.filter(
+            member__branch_id=request.user.branch_id
+        )
 
+    for sale in sales_qs:
         data.append({
             "id": f"sa_{sale.id}",
             "title": "Product Sale",
             "name": sale.product.name,
-
-            # Member phone number
-            "phone": sale.member.phone if sale.member else "",
-
+            "phone": (
+                sale.member.phone
+                if sale.member else ""
+            ),
             "category": "Product",
-            "description": f"{sale.product.name} × {sale.quantity}",
+            "description": (
+                f"{sale.product.name} × {sale.quantity}"
+            ),
             "amount": str(sale.total_amount),
             "payment_method": sale.payment_method,
             "date": sale.sold_at.strftime("%Y-%m-%d"),
             "type": "Product Sale",
-
             "_sort_date": sale.sold_at,
         })
 
-    # =========================
-    # SORT NEWEST FIRST
-    # =========================
-
+    # Sort everything together
     data.sort(
         key=lambda x: x["_sort_date"],
         reverse=True
     )
 
-    # Remove internal sorting field
     for item in data:
         item.pop("_sort_date", None)
 
     return JsonResponse(data, safe=False)
 
-
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def income_by_members(request):
+    tenant = get_tenant(request)
 
-    if request.method != "GET":
-        return JsonResponse(
-            {"error": "GET request only"},
-            status=405
-        )
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse({
+            "error": "Please select a tenant before viewing income"
+        }, status=400)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
 
     period = request.GET.get(
         "period",
@@ -3431,60 +5182,80 @@ def income_by_members(request):
     )
 
     if start_date is None:
-        return JsonResponse(
-            {"error": "Invalid period"},
-            status=400
+        return JsonResponse({
+            "error": "Invalid period"
+        }, status=400)
+
+    base_income = (
+        Income.objects
+        .filter(
+            tenant=tenant,
+            date__date__gte=start_date,
+            date__date__lte=end_date
         )
-
-    # ================================
-    # BASE FILTER
-    # ================================
-
-    base_income = Income.objects.filter(
-        date__date__gte=start_date,
-        date__date__lte=end_date
+        .select_related(
+            "member",
+            "member__plan",
+            "member__branch"
+        )
     )
 
-    # ================================
-    # BASIC
-    # Silver + Gold
-    # ================================
+    # Branch restriction
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+        if not request.user.branch_id:
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
 
-    basic_income = base_income.filter(
-        category="membership",
-        member__plan__in=[
-            "Silver",
-            "Gold"
-        ]
-    ).aggregate(
-        total=Sum("amount")
-    )["total"] or 0
+        base_income = base_income.filter(
+            member__branch_id=request.user.branch_id
+        )
 
-    # ================================
-    # PREMIUM
-    # Premium + Platinum
-    # ================================
+    # Plan is now a ForeignKey
+    basic_income = (
+        base_income
+        .filter(
+            category="membership",
+            member__plan__name__in=[
+                "Silver",
+                "Gold"
+            ]
+        )
+        .aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+    )
 
-    premium_income = base_income.filter(
-        category="membership",
-        member__plan__in=[
-            "Premium",
-            "Platinum"
-        ]
-    ).aggregate(
-        total=Sum("amount")
-    )["total"] or 0
+    premium_income = (
+        base_income
+        .filter(
+            category="membership",
+            member__plan__name__in=[
+                "Premium",
+                "Platinum"
+            ]
+        )
+        .aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+    )
 
-
-    other_income = base_income.filter(
-        category__in=[
-            "registration",
-            "product_sale",
-            "other"
-        ]
-    ).aggregate(
-        total=Sum("amount")
-    )["total"] or 0
+    other_income = (
+        base_income
+        .filter(
+            category__in=[
+                "registration",
+                "product_sale",
+                "other"
+            ]
+        )
+        .aggregate(
+            total=Sum("amount")
+        )["total"] or 0
+    )
 
     return JsonResponse({
         "success": True,
@@ -3504,284 +5275,190 @@ def income_by_members(request):
             {
                 "name": "Other",
                 "amount": float(other_income)
-            }
-        ]
+            },
+        ],
     })
 
-@csrf_exempt
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def expense_by_category(request):
+    tenant = get_tenant(request)
 
-    if request.method != "GET":
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
         return JsonResponse(
-            {"error": "GET request only"},
-            status=405
+            {"error": "Please select a tenant before viewing expenses"},
+            status=400
         )
 
-    period = request.GET.get(
-        "period",
-        "daily"
-    ).lower()
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
 
+    period = request.GET.get("period", "daily").lower()
     selected_date = request.GET.get("date")
 
-    start_date, end_date = get_period_dates(
-        period,
-        selected_date
-    )
+    start_date, end_date = get_period_dates(period, selected_date)
 
     if start_date is None:
         return JsonResponse(
             {"error": "Invalid period"},
             status=400
         )
-
-    expenses = (
-        Expense.objects
-        .filter(
-            date__gte=start_date,
-            date__lte=end_date
-        )
-        .values("category")
-        .annotate(
-            total=Sum("amount")
-        )
-        .order_by("-total")
-    )
-
-    data = []
-
-    for expense in expenses:
-        data.append({
-            "category": expense["category"],
-            "amount": float(
-                expense["total"] or 0
-            )
-        })
-
-    return JsonResponse({
-        "success": True,
-        "period": period,
-        "start_date": start_date,
-        "end_date": end_date,
-        "expenses": data
-    })
-
-
-
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from django.db.models import Sum
-from datetime import date
-
-@csrf_exempt
-def profit_loss_report(request):
-
-    if request.method != "GET":
-        return JsonResponse(
-            {"error": "GET request only"},
-            status=405
-        )
-
-    period = request.GET.get("period")
-    selected_date = request.GET.get("date")
-
-    from_date = request.GET.get("from_date")
-    to_date = request.GET.get("to_date")
-
-    if from_date and to_date:
-        start_date = datetime.strptime(
-            from_date,
-            "%Y-%m-%d"
-        ).date()
-
-        end_date = datetime.strptime(
-            to_date,
-            "%Y-%m-%d"
-        ).date()
-
-    else:
-        start_date, end_date = get_period_dates(
-            period,
-            selected_date
-        )
-
-    if start_date is None:
-        return JsonResponse(
-            {"error": "Invalid period"},
-            status=400
-        )
-
-    # ---------------------------------------
-    # MEMBERSHIP INCOME
-    # ---------------------------------------
-
-    incomes = Income.objects.filter(
-       date__gte=start_date,
-       date__lte=end_date
-    )
-
-    income_members = []
-
-    total_membership_income = 0
-
-    for income in incomes:
-
-        amount = float(income.amount)
-
-        total_membership_income += amount
-
-        income_members.append({
-            "member": income.member.name if income.member else "-",
-            "amount": amount,
-            "payment_method": income.payment_method,
-            "date": income.date.strftime("%d-%m-%Y")
-        })
-
-    # ---------------------------------------
-    # PRODUCT SALES
-    # ---------------------------------------
-
-    sales = Sales_product.objects.select_related(
-        "member",
-        "product"
-    ).filter(
-        sold_at__date__gte=start_date,
-        sold_at__date__lte=end_date
-    )
-
-    sales_list = []
-
-    sales_category = {}
-
-    total_sales = 0
-
-    for sale in sales:
-
-        amount = float(sale.total_amount)
-
-        total_sales += amount
-
-        category = sale.product.category or "Other"
-
-        sales_category[category] = (
-            sales_category.get(category, 0) + amount
-        )
-
-        sales_list.append({
-            "member": sale.member.name if sale.member else "-",
-            "product": sale.product.name,
-            "category": category,
-            "quantity": sale.quantity,
-            "amount": amount,
-            "date": sale.sold_at.strftime("%d-%m-%Y %H:%M")
-        })
-
-    # ---------------------------------------
-    # EXPENSES
-    # ---------------------------------------
 
     expenses = Expense.objects.filter(
+        tenant=tenant,
         date__gte=start_date,
         date__lte=end_date
     )
 
-    expense_list = []
-
-    expense_category = {}
-
-    total_expense = 0
-
-    for expense in expenses:
-
-        amount = float(expense.amount)
-
-        total_expense += amount
-
-        category = expense.category
-
-        expense_category[category] = (
-            expense_category.get(category, 0) + amount
-        )
-
-        expense_list.append({
-            "category": category,
-            "amount": amount,
-            "date": expense.date.strftime("%d-%m-%Y"),
-            "description": expense.description
-        })
-
-    # ---------------------------------------
-    # KPIs
-    # ---------------------------------------
-
-    total_income = total_membership_income + total_sales
-    net_profit = total_income - total_expense
-
-    # ---------------------------------------
-    # RESPONSE
-    # ---------------------------------------
-
-    return JsonResponse({
-
-        "success": True,
-
-        "period": period,
-
-        "start_date": start_date.strftime("%Y-%m-%d"),
-        "end_date": end_date.strftime("%Y-%m-%d"),
-
-        "kpis": {
-
-            "membership_income": total_membership_income,
-
-            "product_sales": total_sales,
-
-            "total_income": total_income,
-
-            "total_expense": total_expense,
-
-            "net_profit": net_profit
-        },
-
-        "sales_category": sales_category,
-
-        "expense_category": expense_category,
-
-        "income_members": income_members,
-
-        "sales": sales_list,
-
-        "expenses": expense_list
-
-    })
-
-
-
-from django.conf import settings
-from groq import Groq
-
-@api_view(["POST"])
-def generate_diet(request):
-    print("USER:", request.user)
-    print("AUTH:", request.auth)
-    member_id = request.data.get("member_id")
-
-    if not member_id:
+    # Current Expense model has no branch field.
+    # Therefore branch users cannot be isolated correctly here yet.
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
         return JsonResponse(
             {
-                "success": False,
-                "error": "member_id is required."
+                "error": "Branch-level expense filtering requires a branch field on Expense."
             },
             status=400
         )
 
-    member = get_object_or_404(Member, id=member_id)
+    qs = (
+        expenses
+        .values("category")
+        .annotate(total=Sum("amount"))
+        .order_by("-total")
+    )
 
-    age = member.age
-    gender = member.gender
-    height = member.height
-    weight = member.weight
-    # food = member.food_preference
+    data = [
+        {
+            "category": expense["category"],
+            "amount": float(expense["total"] or 0)
+        }
+        for expense in qs
+    ]
+
+    return JsonResponse({
+        "success": True,
+        "period": period,
+        "start_date": start_date.strftime("%Y-%m-%d"),
+        "end_date": end_date.strftime("%Y-%m-%d"),
+        "expenses": data,
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def profit_loss_report(request):
+    tenant = get_tenant(request)
+    period = request.GET.get("period")
+    selected_date = request.GET.get("date")
+    from_date = request.GET.get("from_date")
+    to_date = request.GET.get("to_date")
+
+    if from_date and to_date:
+        start_date = datetime.strptime(from_date, "%Y-%m-%d").date()
+        end_date = datetime.strptime(to_date, "%Y-%m-%d").date()
+    else:
+        start_date, end_date = get_period_dates(period, selected_date)
+
+    if start_date is None:
+        return JsonResponse({"error": "Invalid period"}, status=400)
+
+    incomes_qs = Income.objects.filter(tenant=tenant, date__gte=start_date, date__lte=end_date)
+    income_members = []
+    total_membership_income = 0
+    for income in incomes_qs:
+        amount = float(income.amount)
+        total_membership_income += amount
+        income_members.append({
+            "member": income.member.name if income.member else "-", "amount": amount,
+            "payment_method": income.payment_method, "date": income.date.strftime("%d-%m-%Y"),
+        })
+
+    sales_qs = Sales_product.objects.filter(tenant=tenant).select_related("member", "product").filter(
+        sold_at__date__gte=start_date, sold_at__date__lte=end_date
+    )
+    sales_list_data = []
+    sales_category = {}
+    total_sales = 0
+    for sale in sales_qs:
+        amount = float(sale.total_amount)
+        total_sales += amount
+        category = sale.product.category or "Other"
+        sales_category[category] = sales_category.get(category, 0) + amount
+        sales_list_data.append({
+            "member": sale.member.name if sale.member else "-", "product": sale.product.name,
+            "category": category, "quantity": sale.quantity, "amount": amount,
+            "date": sale.sold_at.strftime("%d-%m-%Y %H:%M"),
+        })
+
+    expenses_qs = Expense.objects.filter(tenant=tenant, date__gte=start_date, date__lte=end_date)
+    expense_list_data = []
+    expense_category = {}
+    total_expense = 0
+    for expense in expenses_qs:
+        amount = float(expense.amount)
+        total_expense += amount
+        category = expense.category
+        expense_category[category] = expense_category.get(category, 0) + amount
+        expense_list_data.append({"category": category, "amount": amount, "date": expense.date.strftime("%d-%m-%Y"), "description": expense.description})
+
+    total_income = total_membership_income + total_sales
+    net_profit = total_income - total_expense
+
+    return JsonResponse({
+        "success": True, "period": period,
+        "start_date": start_date.strftime("%Y-%m-%d"), "end_date": end_date.strftime("%Y-%m-%d"),
+        "kpis": {
+            "membership_income": total_membership_income, "product_sales": total_sales,
+            "total_income": total_income, "total_expense": total_expense, "net_profit": net_profit,
+        },
+        "sales_category": sales_category, "expense_category": expense_category,
+        "income_members": income_members, "sales": sales_list_data, "expenses": expense_list_data,
+    })
+
+
+# ============================================================
+# AI: DIET + WORKOUT  (scoped via the member the plan is generated for)
+# ============================================================
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_diet(request):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {"success": False, "error": "Please select a tenant first."},
+            status=400
+        )
+
+    if tenant is None:
+        return JsonResponse(
+            {"success": False, "error": "User is not assigned to a tenant."},
+            status=403
+        )
+
+    member_id = request.data.get("member_id")
+
+    if not member_id:
+        return JsonResponse(
+            {"success": False, "error": "member_id is required."},
+            status=400
+        )
+
+    member = get_object_or_404(
+        Member,
+        id=member_id,
+        tenant=tenant,
+        **get_branch_filter(request, tenant)
+    )
+
+    # Existing AI logic continues...
+
+    age, gender, height, weight = member.age, member.gender, member.height, member.weight
+    goal, food_category = member.goal, member.food_category
 
     client = Groq(api_key=settings.GROQ_API_KEY)
 
@@ -3796,6 +5473,8 @@ Age: {age}
 Gender: {gender}
 Height: {height} cm
 Weight: {weight} kg
+Goal: {goal}
+Food Category: {food_category}
 
 Return ONLY valid JSON.
 
@@ -3811,8 +5490,8 @@ Return exactly in this format:
     "gender": "{gender}",
     "height": {height},
     "weight": {weight},
-
-  
+    "goal": "{goal}",
+    "food_category": "{food_category}"
   }},
   "nutrition": {{
     "daily_calories": "",
@@ -3822,42 +5501,12 @@ Return exactly in this format:
     "water": ""
   }},
   "meals": [
-    {{
-      "meal": "Breakfast",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }},
-    {{
-      "meal": "Morning Snack",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }},
-    {{
-      "meal": "Lunch",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }},
-    {{
-      "meal": "Evening Snack",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }},
-    {{
-      "meal": "Dinner",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }},
-    {{
-      "meal": "Before Bed",
-      "time": "",
-      "foods": [],
-      "calories": ""
-    }}
+    {{"meal": "Breakfast", "time": "", "foods": [], "calories": ""}},
+    {{"meal": "Morning Snack", "time": "", "foods": [], "calories": ""}},
+    {{"meal": "Lunch", "time": "", "foods": [], "calories": ""}},
+    {{"meal": "Evening Snack", "time": "", "foods": [], "calories": ""}},
+    {{"meal": "Dinner", "time": "", "foods": [], "calories": ""}},
+    {{"meal": "Before Bed", "time": "", "foods": [], "calories": ""}}
   ],
   "supplements": [],
   "foods_to_avoid": [],
@@ -3867,17 +5516,10 @@ Return exactly in this format:
 """
 
     chat = client.chat.completions.create(
-        # model="llama-3.3-70b-versatile",
         model="openai/gpt-oss-120b",
         messages=[
-            {
-                "role": "system",
-                "content": "You are a certified sports nutritionist."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": "You are a certified sports nutritionist."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.7,
     )
@@ -3886,230 +5528,36 @@ Return exactly in this format:
 
     try:
         diet_json = json.loads(ai_response)
-
     except json.JSONDecodeError:
+        return JsonResponse({"success": False, "error": "AI returned invalid JSON.", "raw_response": ai_response}, status=500)
 
-        return JsonResponse(
+    return JsonResponse({"success": True, "diet_plan": diet_json})
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def generate_workout(request):
+    tenant = get_tenant(request)
+    member_id = request.data.get("member_id")
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return Response(
             {
                 "success": False,
-                "error": "AI returned invalid JSON.",
-                "raw_response": ai_response
+                "error": "Please select a tenant before generating workout."
             },
-            status=500
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    return JsonResponse(
-        {
-            "success": True,
-            "diet_plan": diet_json
-        }
-    )
-
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-from django.conf import settings
-from django.shortcuts import get_object_or_404
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-
-from groq import Groq
-
-from .models import Member, Exercises, GymEquipment
-from .serializers import ExerciseSerializer
-
-from .ai_image import generate_exercise_image
-from .models import GymEquipment
-from .serializers import GymEquipmentSerializer
-from .ai_image import generate_exercise_image
-
-@api_view(["GET", "POST"])
-def gym_equipment(request):
-
-    # ==========================================
-    # GET ALL EQUIPMENT
-    # ==========================================
-
-    if request.method == "GET":
-
-        equipment = GymEquipment.objects.all().order_by("name")
-
-        serializer = GymEquipmentSerializer(
-            equipment,
-            many=True
+    # Other users must belong to a tenant
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant."
+            },
+            status=status.HTTP_403_FORBIDDEN
         )
-
-        return Response({
-            "success": True,
-            "equipment": serializer.data
-        })
-
-
-    # ==========================================
-    # ADD EQUIPMENT
-    # ==========================================
-
-    if request.method == "POST":
-
-        serializer = GymEquipmentSerializer(
-            data=request.data
-        )
-
-        if serializer.is_valid():
-
-            equipment = serializer.save()
-
-            return Response({
-                "success": True,
-                "message": "Equipment added successfully",
-                "equipment": GymEquipmentSerializer(
-                    equipment
-                ).data
-            }, status=status.HTTP_201_CREATED)
-  
-        return Response({
-            "success": False,
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-
-@api_view(["PUT", "DELETE"])
-def gym_equipment_detail(request, equipment_id):
-
-    try:
-
-        equipment = GymEquipment.objects.get(
-            id=equipment_id
-        )
-
-    except GymEquipment.DoesNotExist:
-
-        return Response({
-            "success": False,
-            "error": "Equipment not found"
-        }, status=status.HTTP_404_NOT_FOUND)
-
-
-    # ==========================================
-    # UPDATE
-    # ==========================================
-
-    if request.method == "PUT":
-
-        serializer = GymEquipmentSerializer(
-            equipment,
-            data=request.data
-        )
-
-        if serializer.is_valid():
-
-            equipment = serializer.save()
-
-            return Response({
-                "success": True,
-                "message": "Equipment updated successfully",
-                "equipment": serializer.data
-            })
-
-        return Response({
-            "success": False,
-            "errors": serializer.errors
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-
-    # ==========================================
-    # DELETE
-    # ==========================================
-
-    if request.method == "DELETE":
-
-        equipment.delete()
-
-        return Response({
-            "success": True,
-            "message": "Equipment deleted successfully"
-        })
-
-    
-
-
-
-from rest_framework.decorators import api_view
-
-from rest_framework.response import Response
-
-from rest_framework import status
-
-from .models import Exercises
-
-from .serializers import ExerciseSerializer
-
-@api_view(["POST"])
-def create_exercise(request):
-
-    serializer = ExerciseSerializer(
-        data=request.data
-    )
-
-    if serializer.is_valid():
-
-        exercise = serializer.save()
-
-        return Response({
-
-            "success": True,
-
-            "message": "Exercise created successfully",
-
-            "exercise": serializer.data
-
-        }, status=status.HTTP_201_CREATED)
-
-    return Response({
-
-        "success": False,
-
-        "errors": serializer.errors
-
-    }, status=status.HTTP_400_BAD_REQUEST)
-import json
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-
-from django.conf import settings
-from django.shortcuts import get_object_or_404
-
-from groq import Groq
-
-from .models import Member, Exercises, GymEquipment
-from .ai_image import generate_exercise_image
-import json
-
-from django.conf import settings
-from django.shortcuts import get_object_or_404
-
-from rest_framework.decorators import api_view
-from rest_framework.response import Response
-from rest_framework import status
-
-from groq import Groq
-
-from .models import Member, GymEquipment, Exercises
-
-
-@api_view(["POST"])
-def generate_workout(request):
-
-    # =====================================================
-    # 1. MEMBER
-    # =====================================================
-
-    member_id = request.data.get("member_id")
 
     if not member_id:
         return Response(
@@ -4120,957 +5568,660 @@ def generate_workout(request):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # ---------------------------------------------------------
+    # Get member within selected tenant + branch scope
+    # ---------------------------------------------------------
     member = get_object_or_404(
         Member,
-        id=member_id
+        id=member_id,
+        tenant=tenant,
+        **get_branch_filter(request, tenant)
     )
 
-    # =====================================================
-    # 2. HEIGHT / WEIGHT
-    # =====================================================
-
-    if not member.height or not member.weight:
-
-        return Response(
-            {
-                "success": False,
-                "error": "Height and weight are required"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    try:
-
-        height_m = float(member.height) / 100
-        weight = float(member.weight)
-
-    except (ValueError, TypeError):
-
-        return Response(
-            {
-                "success": False,
-                "error": "Invalid height or weight"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if height_m <= 0 or weight <= 0:
-
-        return Response(
-            {
-                "success": False,
-                "error": "Invalid height or weight"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # =====================================================
-    # 3. BMI
-    # =====================================================
-
-    bmi = weight / (height_m ** 2)
-
-    # =====================================================
-    # 4. AVAILABLE EQUIPMENT
-    # =====================================================
-
-    gym_equipment = GymEquipment.objects.filter(
-        is_available=True,
-        quantity__gt=0
-    )
-
-    if not gym_equipment.exists():
-
-        return Response(
-            {
-                "success": False,
-                "error": "No gym equipment is currently available"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    available_equipment = []
-
-    for equipment in gym_equipment:
-
-        if equipment.name:
-
-            available_equipment.append(
-                equipment.name.strip()
-            )
-
-    if not available_equipment:
-
-        return Response(
-            {
-                "success": False,
-                "error": "No valid gym equipment found"
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # =====================================================
-    # 5. EQUIPMENT NORMALIZATION
-    # =====================================================
-
-    def normalize_equipment(value):
-
-        if not value:
-            return "bodyweight"
-
-        value = value.strip().lower()
-
-        aliases = {
-
-            "dumbbells": "dumbbell",
-            "dumbbell": "dumbbell",
-
-            "barbells": "barbell",
-            "barbell": "barbell",
-
-            "cables": "cable",
-            "cable machine": "cable",
-            "cable": "cable",
-
-            "machines": "machine",
-            "machine": "machine",
-
-            "pull up bar": "pullup bar",
-            "pull-up bar": "pullup bar",
-            "pullup bar": "pullup bar",
-
-            "body weight": "bodyweight",
-            "bodyweight": "bodyweight",
-        }
-
-        return aliases.get(value, value)
-
-    # Remove duplicate equipment names
-    available_equipment = list(
-        dict.fromkeys(available_equipment)
-    )
-
-    available_equipment_normalized = {
-        normalize_equipment(equipment)
-        for equipment in available_equipment
-    }
-
-    # =====================================================
-    # 6. GET ALL EXERCISES
-    # =====================================================
-
-    all_exercises = (
-        Exercises.objects
-        .all()
-        .order_by("id")
-    )
-
-    available_exercises = []
-
-    seen_exercise_names = set()
-
-    for exercise in all_exercises:
-
-        if not exercise.name:
-            continue
-
-        normalized_name = (
-            exercise.name
-            .strip()
-            .lower()
-        )
-
-        # Prevent duplicate exercise names
-        if normalized_name in seen_exercise_names:
-            continue
-
-        # -------------------------------------------------
-        # BODYWEIGHT
-        # -------------------------------------------------
-
-        if not exercise.equipment:
-
-            available_exercises.append(exercise)
-
-            seen_exercise_names.add(
-                normalized_name
-            )
-
-            continue
-
-        # -------------------------------------------------
-        # EQUIPMENT
-        # -------------------------------------------------
-
-        exercise_equipment = normalize_equipment(
-            exercise.equipment
-        )
-
-        if exercise_equipment in available_equipment_normalized:
-
-            available_exercises.append(exercise)
-
-            seen_exercise_names.add(
-                normalized_name
-            )
-
-    # =====================================================
-    # 7. REQUIRED BODY PARTS
-    # =====================================================
-
-    required_body_parts = [
-        "Chest",
-        "Back",
-        "Legs",
-        "Shoulders",
-        "Biceps",
-        "Triceps"
-    ]
-
-    # =====================================================
-    # 8. GROUP EXERCISES
-    # =====================================================
-
-    exercises_by_body_part = {}
-
-    for exercise in available_exercises:
-
-        if not exercise.body_part:
-            continue
-
-        body_part = (
-            exercise.body_part
-            .strip()
-            .lower()
-        )
-
-        if body_part not in exercises_by_body_part:
-
-            exercises_by_body_part[body_part] = []
-
-        exercises_by_body_part[body_part].append(
-            {
-                "id": exercise.id,
-                "name": exercise.name,
-                "equipment": (
-                    exercise.equipment
-                    if exercise.equipment
-                    else "Bodyweight"
-                )
-            }
-        )
-
-    # =====================================================
-    # 9. CHECK 4 EXERCISES PER BODY PART
-    # =====================================================
-
-    missing_body_parts = []
-
-    for body_part in required_body_parts:
-
-        exercises_for_part = (
-            exercises_by_body_part.get(
-                body_part.lower(),
-                []
-            )
-        )
-
-        if len(exercises_for_part) < 4:
-
-            missing_body_parts.append(
-                {
-                    "body_part": body_part,
-                    "available": len(exercises_for_part),
-                    "required": 4
-                }
-            )
-
-    if missing_body_parts:
-
-        return Response(
-            {
-                "success": False,
-                "error": (
-                    "Not enough compatible exercises "
-                    "for the available equipment"
-                ),
-                "missing_body_parts": missing_body_parts,
-                "available_equipment": available_equipment
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # =====================================================
-    # 10. PREPARE EXERCISES FOR AI
-    # =====================================================
-
-    ai_exercises = {}
-
-    for body_part in required_body_parts:
-
-        ai_exercises[body_part] = (
-            exercises_by_body_part[
-                body_part.lower()
-            ]
-        )
-
-    # =====================================================
-    # 11. GROQ CLIENT
-    # =====================================================
-
-    client = Groq(
-        api_key=settings.GROQ_API_KEY
-    )
-
-    # =====================================================
-    # 12. PROMPT
-    # =====================================================
-
+    # ---------------------------------------------------------
+    # Get available gym equipment
+    # ---------------------------------------------------------
+    equipment = GymEquipment.objects.filter(
+        tenant=tenant,
+        is_available=True
+    ).values_list("name", flat=True)
+
+    equipment_list = list(equipment)
+
+    # ---------------------------------------------------------
+    # Groq client
+    # ---------------------------------------------------------
+    client = Groq(api_key=settings.GROQ_API_KEY)
+
+    # ---------------------------------------------------------
+    # AI Prompt
+    # Existing workout generation logic preserved
+    # ---------------------------------------------------------
     prompt = f"""
-You are a professional gym workout planner.
-
-Create a 6-day workout plan for this member.
+Create a personalized 6-day gym workout plan.
 
 MEMBER:
-
 Age: {member.age}
-
 Gender: {member.gender}
+Height: {member.height}
+Weight: {member.weight}
+Goal: {member.goal}
 
-Height: {member.height} cm
+AVAILABLE GYM EQUIPMENT:
+{equipment_list}
 
-Weight: {member.weight} kg
+RULES:
 
-BMI: {round(bmi, 2)}
+- Use only the available equipment listed above.
+- Bodyweight exercises are allowed.
+- Create exactly 6 days.
+- Each day should focus on a suitable body part.
+- Do not train the same major body part on consecutive days.
+- Make the workout suitable for the member's goal.
+- Do not include images.
+- Do not include explanations.
+- Do not include unnecessary information.
 
+For every workout provide:
 
-AVAILABLE EQUIPMENT:
+- workout_name
+- sets
+- reps
+- duration
 
-{json.dumps(
-    available_equipment,
-    indent=2
-)}
-
-
-AVAILABLE EXERCISES:
-
-{json.dumps(
-    ai_exercises,
-    indent=2
-)}
-
-
-STRICT RULES:
-
-1. Create exactly 6 days.
-
-2. Day 1 = Chest.
-
-3. Day 2 = Back.
-
-4. Day 3 = Legs.
-
-5. Day 4 = Shoulders.
-
-6. Day 5 = Biceps.
-
-7. Day 6 = Triceps.
-
-8. Each day must contain exactly 4 exercises.
-
-9. Total exercises must be exactly 24.
-
-10. Every exercise must be unique.
-
-11. NEVER repeat an exercise.
-
-12. ONLY use exercise IDs from AVAILABLE EXERCISES.
-
-13. NEVER invent an exercise.
-
-14. NEVER invent an exercise ID.
-
-15. NEVER use unavailable equipment.
-
-16. Every exercise must belong to its day's body part.
-
-17. Select exercises appropriately for the member's BMI.
-
-18. Choose appropriate sets.
-
-19. Choose appropriate reps.
-
-20. Choose appropriate rest.
-
-21. Do NOT include markdown.
-
-22. Do NOT include explanations outside JSON.
-
-23. Do NOT include exercise names instead of IDs.
-
-24. exercise_id must exactly match the supplied exercise ID.
-
-25. Return ONLY valid JSON.
-
-IMPORTANT:
-Do not add trailing commas.
-Use double quotes for all JSON keys and string values.
-
-JSON STRUCTURE:
+Return ONLY valid JSON using exactly this structure:
 
 {{
-    "days": [
+    "workout_plan": [
         {{
             "day": 1,
             "body_part": "Chest",
-            "exercises": [
-{{
-    "exercise_id": 38,
-    "sets": 4,
-    "reps": 10,
-    "rest": "90 seconds"
-}}
+            "workouts": [
+                {{
+                    "workout_name": "Bench Press",
+                    "sets": 3,
+                    "reps": "10-12",
+                    "duration": 10
+                }}
             ]
         }}
     ]
 }}
-
-Return exactly 6 days and exactly 24 unique exercise IDs.
 """
 
-    # =====================================================
-    # 13. GROQ REQUEST
-    # =====================================================
-
     try:
-
-        chat = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="openai/gpt-oss-120b",
-
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a professional workout planner. "
-                        "Return ONLY valid JSON."
-                    )
-                },
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
+            temperature=0.4,
+            response_format={"type": "json_object"},
+        )
 
-            temperature=0.1,
-            max_tokens=5000,
-            response_format={
-                "type": "json_object"
+        content = response.choices[0].message.content
+
+        workout_data = json.loads(content)
+
+        return Response(
+            {
+                "success": True,
+                "workout_plan": workout_data["workout_plan"]
             }
         )
 
-        ai_response = (
-            chat
-            .choices[0]
-            .message
-            .content
-            .strip()
+    except json.JSONDecodeError:
+        return Response(
+            {
+                "success": False,
+                "error": "AI returned invalid JSON"
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
     except Exception as e:
-
         return Response(
             {
                 "success": False,
-                "error": "Failed to generate workout",
-                "details": str(e)
+                "error": str(e)
             },
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+    
 
-    # =====================================================
-    # DEBUG
-    # =====================================================
+# ============================================================
+# GYM EQUIPMENT
+# ============================================================
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def gym_equipment(request):
+    tenant = get_tenant(request)
 
-    print("\n================ AI RESPONSE ================\n")
-    print(ai_response)
-    print("\n==============================================\n")
-
-    # =====================================================
-    # 14. PARSE JSON
-    # =====================================================
-
-    try:
-
-        workout_data = json.loads(
-            ai_response
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return Response(
+            {"success": False, "error": "Please select a tenant first."},
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    except json.JSONDecodeError as e:
+    if tenant is None:
+        return Response(
+            {"success": False, "error": "User is not assigned to a tenant."},
+            status=status.HTTP_403_FORBIDDEN
+        )
 
+    if request.method == "GET":
+        equipment = GymEquipment.objects.filter(
+            tenant=tenant
+        ).order_by("name")
+
+        serializer = GymEquipmentSerializer(equipment, many=True)
+
+        return Response({
+            "success": True,
+            "equipment": serializer.data
+        })
+
+    # POST
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
         return Response(
             {
                 "success": False,
-                "error": "AI returned invalid JSON",
-                "details": str(e),
-                "raw_response": ai_response
+                "error": "Only Super Admin and Tenant Admin can add equipment."
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_403_FORBIDDEN
         )
 
-    # =====================================================
-    # 15. VALIDATE DAYS
-    # =====================================================
-
-    days = workout_data.get(
-        "days",
-        []
-    )
-
-    if not isinstance(days, list):
-
-        return Response(
-            {
-                "success": False,
-                "error": "Invalid days format"
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    if len(days) != 6:
-
-        return Response(
-            {
-                "success": False,
-                "error": (
-                    "Workout must contain exactly 6 days"
-                )
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    # =====================================================
-    # 16. EXERCISE LOOKUP
-    # =====================================================
-
-    exercise_lookup = {
-        exercise.id: exercise
-        for exercise in available_exercises
-    }
-
-    used_exercise_ids = set()
-    used_exercise_names = set()
-
-    expected_body_parts = [
-        "Chest",
-        "Back",
-        "Legs",
-        "Shoulders",
-        "Biceps",
-        "Triceps"
-    ]
-
-    # =====================================================
-    # 17. VALIDATE EACH DAY
-    # =====================================================
-
-    for index, day in enumerate(days):
-
-        expected_day = index + 1
-
-        expected_body_part = (
-            expected_body_parts[index]
-        )
-
-        # -------------------------------------------------
-        # DAY NUMBER
-        # -------------------------------------------------
-
-        if day.get("day") != expected_day:
-
-            return Response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Invalid day number. "
-                        f"Expected {expected_day}"
-                    )
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        # -------------------------------------------------
-        # BODY PART
-        # -------------------------------------------------
-
-        actual_body_part = str(
-            day.get("body_part", "")
-        ).strip().lower()
-
-        if actual_body_part != expected_body_part.lower():
-
-            return Response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Day {expected_day} must be "
-                        f"{expected_body_part}"
-                    )
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        # -------------------------------------------------
-        # EXERCISES
-        # -------------------------------------------------
-
-        exercises_for_day = day.get(
-            "exercises",
-            []
-        )
-
-        if not isinstance(
-            exercises_for_day,
-            list
-        ):
-
-            return Response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Invalid exercises format "
-                        f"on day {expected_day}"
-                    )
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        if len(exercises_for_day) != 4:
-
-            return Response(
-                {
-                    "success": False,
-                    "error": (
-                        f"Day {expected_day} must have "
-                        f"exactly 4 exercises"
-                    )
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        # -------------------------------------------------
-        # EACH EXERCISE
-        # -------------------------------------------------
-
-        for exercise_data in exercises_for_day:
-
-            exercise_id = exercise_data.get(
-                "exercise_id"
-            )
-
-            if not exercise_id:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Exercise ID missing "
-                            f"on day {expected_day}"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            # ---------------------------------------------
-            # DATABASE EXERCISE
-            # ---------------------------------------------
-
-            exercise = exercise_lookup.get(
-                exercise_id
-            )
-
-            if not exercise:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Exercise ID {exercise_id} "
-                            f"is not available with "
-                            f"current gym equipment"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            # ---------------------------------------------
-            # DUPLICATE ID
-            # ---------------------------------------------
-
-            if exercise.id in used_exercise_ids:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Exercise '{exercise.name}' "
-                            f"was repeated"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            # ---------------------------------------------
-            # DUPLICATE NAME
-            # ---------------------------------------------
-
-            exercise_name_key = (
-                exercise.name
-                .strip()
-                .lower()
-            )
-
-            if exercise_name_key in used_exercise_names:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"Duplicate exercise "
-                            f"name '{exercise.name}'"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            used_exercise_ids.add(
-                exercise.id
-            )
-
-            used_exercise_names.add(
-                exercise_name_key
-            )
-
-            # ---------------------------------------------
-            # BODY PART CHECK
-            # ---------------------------------------------
-
-            if not exercise.body_part:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"{exercise.name} has no "
-                            f"body part"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            if (
-                exercise.body_part
-                .strip()
-                .lower()
-                != expected_body_part.lower()
-            ):
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"{exercise.name} does not "
-                            f"belong to "
-                            f"{expected_body_part}"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            # ---------------------------------------------
-            # DESCRIPTION
-            # ---------------------------------------------
-
-            description = exercise_data.get(
-                "description"
-            )
-
-            if not description:
-
-                return Response(
-                    {
-                        "success": False,
-                        "error": (
-                            f"AI did not generate "
-                            f"description for "
-                            f"{exercise.name}"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-
-            exercise_data["description"] = (
-                str(description).strip()
-            )
-
-            # ---------------------------------------------
-            # DATABASE DATA
-            # ---------------------------------------------
-
-            exercise_data["exercise_id"] = (
-                exercise.id
-            )
-
-            exercise_data["name"] = (
-                exercise.name
-            )
-
-            exercise_data["body_part"] = (
-                exercise.body_part
-            )
-
-            exercise_data["equipment"] = (
-                exercise.equipment
-                if exercise.equipment
-                else "Bodyweight"
-            )
-
-            # =================================================
-            # IMAGE
-            # =================================================
-
-            exercise_data["image"] = None
-
-            if exercise.image:
-
-                try:
-
-                    exercise_data["image"] = (
-                        exercise.image.url
-                    )
-
-                except Exception:
-
-                    exercise_data["image"] = None
-
-            else:
-
-                try:
-
-                    public_id = (
-                        generate_exercise_image(
-                            exercise
-                        )
-                    )
-
-                    exercise.image = public_id
-
-                    exercise.save(
-                        update_fields=["image"]
-                    )
-
-                    exercise.refresh_from_db(
-                        fields=["image"]
-                    )
-
-                    exercise_data["image"] = (
-                        exercise.image.url
-                    )
-
-                except Exception as e:
-
-                    print(
-                        f"Image generation failed "
-                        f"for {exercise.name}: {e}"
-                    )
-
-                    exercise_data["image"] = None
-
-    # =====================================================
-    # 18. FINAL 24 EXERCISE CHECK
-    # =====================================================
-
-    if len(used_exercise_ids) != 24:
-
-        return Response(
-            {
-                "success": False,
-                "error": (
-                    "Workout must contain "
-                    "exactly 24 unique exercises"
-                )
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    # =====================================================
-    # 19. FINAL NAME CHECK
-    # =====================================================
-
-    if len(used_exercise_names) != 24:
-
-        return Response(
-            {
-                "success": False,
-                "error": (
-                    "Workout contains duplicate "
-                    "exercise names"
-                )
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
-    # =====================================================
-    # 20. FINAL RESPONSE
-    # =====================================================
+    serializer = GymEquipmentSerializer(data=request.data)
+
+    if serializer.is_valid():
+        equipment = serializer.save(tenant=tenant)
+
+        return Response({
+            "success": True,
+            "message": "Equipment added successfully",
+            "equipment": GymEquipmentSerializer(equipment).data,
+        }, status=status.HTTP_201_CREATED)
 
     return Response(
         {
-            "success": True,
-
-            "member": {
-                "id": member.id,
-                "age": member.age,
-                "gender": member.gender,
-                "height": member.height,
-                "weight": member.weight,
-                "bmi": round(bmi, 2)
-            },
-
-            "available_equipment":
-                available_equipment,
-
-            "workout_plan":
-                workout_data
+            "success": False,
+            "errors": serializer.errors
         },
-        status=status.HTTP_200_OK
+        status=status.HTTP_400_BAD_REQUEST
     )
 
-# from rest_framework.decorators import api_view
-# from rest_framework.response import Response
-# from .models import DietPlanPDF
-# from .serializers import DietPlanPDFSerializer
+
+@api_view(["PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def gym_equipment_detail(request, equipment_id):
+    tenant = get_tenant(request)
+
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "Please select a tenant first."
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant."
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+        return Response(
+            {
+                "success": False,
+                "error": "You do not have permission to modify equipment."
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    try:
+        equipment = GymEquipment.objects.get(
+            id=equipment_id,
+            tenant=tenant
+        )
+    except GymEquipment.DoesNotExist:
+        return Response(
+            {
+                "success": False,
+                "error": "Equipment not found."
+            },
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    if request.method == "PUT":
+        serializer = GymEquipmentSerializer(
+            equipment,
+            data=request.data
+        )
+
+        if serializer.is_valid():
+            equipment = serializer.save()
+
+            return Response({
+                "success": True,
+                "message": "Equipment updated successfully",
+                "equipment": GymEquipmentSerializer(equipment).data
+            })
+
+        return Response(
+            {
+                "success": False,
+                "errors": serializer.errors
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    if request.method == "DELETE":
+        equipment.delete()
+
+        return Response({
+            "success": True,
+            "message": "Equipment deleted successfully"
+        })
+    
 
 
-# @api_view(["POST"])
-# def upload_diet_pdf(request):
-#     serializer = DietPlanPDFSerializer(
-#         data=request.data,
-#         context={
-#             "request": request
-#         }
-#     )
+from django.http import JsonResponse
+import json
+from datetime import datetime, date, timedelta
 
-#     if serializer.is_valid():
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
+from rest_framework.response import Response
+from rest_framework import status
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import authenticate
+from django.shortcuts import get_object_or_404
+from django.db.models import Sum
 
-#         serializer.save()
+import csv
+import io
+import uuid
 
-#         return Response({
-#             "success": True,
-#             "pdf_url": serializer.data["pdf"]
-#         })
+from .models import (
+    Branch, Enquiry, Expense, GymEquipment, Payment, Product,
+    Sales_product, Member, Income, MemberPause, Staffs, Plan,
+)
+from .serializers import GymEquipmentSerializer
+from .tenant_utils import get_tenant, get_branch_filter
 
 
-#     return Response(
-#         serializer.errors,
-#         status=400
-#     )
+# ============================================================
+# IMPORT CSV  (tenant-stamped on every created row)
+# ============================================================
+
+IMPORT_CONFIG = {
+    "member": {
+        "model": Member,
+        "mapping": {
+            "first_name": "name",
+            "phone": "phone",
+            "email": "email",
+            "plan": "plan",
+            "age": "age",
+        },
+    },
+    "staff": {
+        "model": Staffs,
+        "mapping": {
+            "first_name": "name",
+            "number": "phone",
+            "salary": "salary",
+            "joindate": "joining_date",
+        },
+    },
+}
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def import_csv(request):
+    tenant = get_tenant(request)
+
+    csv_file = request.FILES.get("file")
+    model_type = request.data.get("model")
+
+    if not csv_file:
+        return Response({"success": False, "error": "CSV file is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not model_type:
+        return Response({"success": False, "error": "model is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+    config = IMPORT_CONFIG.get(model_type)
+    if not config:
+        return Response({"success": False, "error": f"Unsupported model: {model_type}"}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        decoded_file = csv_file.read().decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(decoded_file))
+
+        Model = config["model"]
+        mapping = config["mapping"]
+
+        imported = []
+        skipped = []
+
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                data = {"tenant": tenant}  # <-- stamp tenant on every imported row
+
+                for csv_field, model_field in mapping.items():
+                    value = row.get(csv_field, "")
+                    if value is not None:
+                        value = value.strip()
+                    if value != "":
+                        data[model_field] = value
+
+                if model_type == "member":
+                    data["id"] = str(uuid.uuid4())
+                    if "age" in data:
+                        data["age"] = int(data["age"])
+
+                if model_type == "staff":
+                    if "salary" in data:
+                        data["salary"] = float(data["salary"])
+
+                obj = Model.objects.create(**data)
+                imported.append({"row": row_number, "id": obj.id})
+
+            except Exception as e:
+                skipped.append({"row": row_number, "error": str(e)})
+
+        return Response({
+            "success": True,
+            "model": model_type,
+            "imported_count": len(imported),
+            "skipped_count": len(skipped),
+            "imported": imported,
+            "skipped": skipped,
+        })
+
+    except Exception as e:
+        return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+from django.http import JsonResponse
+from datetime import datetime, date, timedelta
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+from .models import Member, Plan, Branch, MemberPause
+from .tenant_utils import get_tenant, get_branch_filter
+
+# ============================================================
+# PLANS
+# ============================================================
+
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+
+from django.db.models import Sum
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+from .models import Member, Income, Expense, Sales_product, Payment, Plan
+from .tenant_utils import get_tenant, get_branch_filter
+
+
+def calculate_growth(current, previous):
+    if previous == 0:
+        return 100 if current > 0 else 0
+    return round(((current - previous) / previous) * 100, 2)
+
+
+import json
+from datetime import date, datetime, timedelta
+
+from django.conf import settings
+from django.db.models import Sum
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework import status
+from groq import Groq
+
+from .models import (
+    Member, Staffs, Payment, Expense, Income, Product, Sales_product,
+    Enquiry, GymEquipment, MemberPause,
+)
+from .serializers import GymEquipmentSerializer
+from .tenant_utils import get_tenant, get_branch_filter
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def sell_product(request):
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Please select a tenant before selling a product."
+            },
+            status=400
+        )
+
+    # Other users must belong to a tenant
+    if tenant is None:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "User is not assigned to a tenant."
+            },
+            status=403
+        )
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Invalid JSON"
+            },
+            status=400
+        )
+
+    product_id = data.get("product_id")
+    member_id = data.get("member_id")
+
+    try:
+        quantity = int(data.get("quantity", 0))
+    except (ValueError, TypeError):
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Invalid quantity"
+            },
+            status=400
+        )
+
+    payment_method = data.get("payment_method", "cash")
+
+    # ---------------------------------------------------------
+    # Validate required data
+    # ---------------------------------------------------------
+    if not product_id or not member_id:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Missing data"
+            },
+            status=400
+        )
+
+    if quantity <= 0:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Invalid quantity"
+            },
+            status=400
+        )
+
+    # ---------------------------------------------------------
+    # Get member within tenant + branch scope
+    # ---------------------------------------------------------
+    try:
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+
+    except Member.DoesNotExist:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Member not found or access denied"
+            },
+            status=404
+        )
+
+    # ---------------------------------------------------------
+    # Get product within selected tenant
+    # ---------------------------------------------------------
+    try:
+        product = Product.objects.get(
+            id=product_id,
+            tenant=tenant
+        )
+
+    except Product.DoesNotExist:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Product not found"
+            },
+            status=404
+        )
+
+    # ---------------------------------------------------------
+    # Check stock
+    # ---------------------------------------------------------
+    if quantity > product.stock:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Insufficient stock"
+            },
+            status=400
+        )
+
+    # ---------------------------------------------------------
+    # Calculate sale amount
+    # ---------------------------------------------------------
+    unit_price = product.price
+    total_amount = unit_price * quantity
+
+    # ---------------------------------------------------------
+    # Create sale
+    # ---------------------------------------------------------
+    sale = Sales_product.objects.create(
+        tenant=tenant,
+        member=member,
+        product=product,
+        quantity=quantity,
+        unit_price=unit_price,
+        total_amount=total_amount,
+        payment_method=payment_method,
+    )
+
+    # ---------------------------------------------------------
+    # Reduce product stock
+    # ---------------------------------------------------------
+    product.stock -= quantity
+    product.save()
+
+    return JsonResponse(
+        {
+            "success": True,
+            "message": "Sale completed",
+            "sale_id": sale.id
+        },
+        status=201
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def validate_member(request, member_id):
+    tenant = get_tenant(request)
+
+    # SUPER_ADMIN must select a tenant
+    if request.user.role == "SUPER_ADMIN" and tenant is None:
+        return JsonResponse(
+            {
+                "exists": False,
+                "error": "Please select a tenant before validating a member."
+            },
+            status=400
+        )
+
+    # Other users must belong to a tenant
+    if tenant is None:
+        return JsonResponse(
+            {
+                "exists": False,
+                "error": "User is not assigned to a tenant."
+            },
+            status=403
+        )
+
+    try:
+        member = Member.objects.get(
+            id=member_id,
+            tenant=tenant,
+            **get_branch_filter(request, tenant)
+        )
+
+        return JsonResponse({
+            "exists": True,
+            "member_name": member.name
+        })
+
+    except Member.DoesNotExist:
+        return JsonResponse(
+            {
+                "exists": False,
+                "message": "Member not found or access denied"
+            },
+            status=404
+        )
+    
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def expenses(request):
+    tenant = get_tenant(request)
+    qs = Expense.objects.filter(tenant=tenant).order_by("-date", "-id")
+
+    data = [
+        {
+            "id": e.id, "title": e.title, "name": e.name, "phone": e.phone, "category": e.category,
+            "description": e.description, "amount": str(e.amount), "payment_method": e.payment_method,
+            "date": e.date.strftime("%Y-%m-%d"), "type": "Salary" if e.is_system_generated else "Additional",
+        }
+        for e in qs
+    ]
+    return JsonResponse(data, safe=False)

@@ -2,13 +2,91 @@ from django.db import models
 from cloudinary.models import CloudinaryField
 
 
-class Member(models.Model):
+
+class Tenant(models.Model):
+    name = models.CharField(max_length=255, unique=True)
+    slug = models.SlugField(unique=True)
+    email = models.EmailField(blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name
+
+class TenantBaseModel(models.Model):
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="%(class)s_set"
+    )
+
+    class Meta:
+        abstract = True
+
+class Plan(TenantBaseModel):
+    name = models.CharField(max_length=100)
+    duration = models.IntegerField()
+    price = models.FloatField()
+
+class Branch(TenantBaseModel):
+    name = models.CharField(max_length=255)
+    location = models.CharField(max_length=255)
+    manager_name = models.CharField(max_length=255, blank=True, null=True)
+    phone = models.CharField(max_length=20, blank=True, null=True)
+    capacity = models.IntegerField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.tenant.name} - {self.name}"
+
+from django.contrib.auth.models import AbstractUser
+
+
+class CustomUser(AbstractUser):
+
+    ROLE_CHOICES = [
+        ("SUPER_ADMIN", "Super Admin"),
+        ("TENANT_ADMIN", "Tenant Admin"),
+        ("BRANCH_ADMIN", "Branch Admin"),
+        ("STAFF", "Staff"),
+    ]
+
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="users"
+    )
+
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="users"
+    )
+
+    role = models.CharField(
+        max_length=20,
+        choices=ROLE_CHOICES,
+        default="STAFF"
+    )
+
+    def __str__(self):
+        return self.username
+
+class Member(TenantBaseModel):
     id = models.CharField(max_length=100, primary_key=True)
     name = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20)
     email = models.EmailField(blank=True, null=True)
-    plan = models.CharField(max_length=100, null=True, blank=True)
-    branch = models.CharField(max_length=100, null=True, blank=True)  
+    # plan = models.CharField(max_length=100, null=True, blank=True)
+    # branch = models.CharField(max_length=100, null=True, blank=True)  
+    plan = models.ForeignKey(Plan,on_delete=models.PROTECT,related_name="members",null=True,blank=True)
+    branch = models.ForeignKey(Branch,on_delete=models.PROTECT,related_name="members",null=True,blank=True)
     join_date = models.CharField(max_length=50, blank=True, null=True)
     status = models.CharField(max_length=50, blank=True, null=True)
     photo = CloudinaryField("image",blank=True, null=True)
@@ -16,6 +94,19 @@ class Member(models.Model):
     weight = models.FloatField(blank=True, null=True)
     bmi = models.FloatField(blank=True, null=True, editable=False)
     age = models.IntegerField(blank=True, null=True)
+    goal = models.CharField(max_length=50,
+        choices=[
+        ("weight_loss", "Weight Loss"),
+        ("weight_gain", "Weight Gain"),
+        ("muscle_gain", "Muscle Gain"),
+        ("maintenance", "Maintenance"),
+        ],blank=True,null=True,)
+    food_category = models.CharField(max_length=50,
+            choices=[
+            ("vegetarian", "Vegetarian"),
+            ("non_vegetarian", "Non-Vegetarian"),
+            ("vegan", "Vegan"),
+            ],blank=True,null=True,)
     blood_group = models.CharField(max_length=20, blank=True, null=True)
     location = models.CharField(max_length=255, blank=True, null=True)
     adhaar_number = models.CharField(max_length=50, blank=True, null=True)
@@ -26,57 +117,19 @@ class Member(models.Model):
     is_paused = models.BooleanField(default=False)
     pause_start_date = models.DateField(blank=True, null=True)
     used_pause_days = models.PositiveIntegerField(default=0)
-    pause_expiry_date = models.DateField(
-        blank=True,
-        null=True
-    )
+    pause_expiry_date = models.DateField(blank=True,null=True)
 
-class MemberPause(models.Model):
-    member = models.ForeignKey(
-        Member,
-        on_delete=models.CASCADE,
-        related_name="pause_history"
-    )
-
+class MemberPause(TenantBaseModel):
+    member = models.ForeignKey(Member,on_delete=models.CASCADE,related_name="pause_history")
     start_date = models.DateField()
-
-    end_date = models.DateField(
-        null=True,
-        blank=True
-    )
-
+    end_date = models.DateField(null=True,blank=True)
     allowed_days = models.PositiveIntegerField(default=0)
-
     paused_days = models.PositiveIntegerField(default=0)
-
-    # remove these two fields from here
-    # expiry_date
-    # pause_expiry_date
-
     created_at = models.DateTimeField(auto_now_add=True)
-
     def __str__(self):
         return f"{self.member.name} - {self.start_date}"
 
-    
-
-class Plan(models.Model):
-    name = models.CharField(max_length=100)
-    duration = models.IntegerField()
-    price = models.FloatField()
-
-class Trainer(models.Model):
-    name = models.CharField(max_length=255)
-    specialization = models.CharField(max_length=255, blank=True, null=True)
-    phone = models.CharField(max_length=20, blank=True, null=True)
-    photo = models.CharField(max_length=500, blank=True, null=True)
-    experience = models.CharField(max_length=100, blank=True, null=True)
-    salary = models.FloatField(blank=True, null=True)
-    join_date = models.CharField(max_length=50, blank=True, null=True)
-
-
-
-class Staffs(models.Model):
+class Staffs(TenantBaseModel):
     ROLE_CHOICES = [
         ("Trainer", "Trainer"),
         ("Receptionist", "Receptionist"),
@@ -89,30 +142,62 @@ class Staffs(models.Model):
         ("Active", "Active"),
         ("Inactive", "Inactive"),
     ]
+
     name = models.CharField(max_length=100, blank=True, null=True)
-    role = models.CharField(max_length=100, blank=True, null=True)
-    specialization = models.CharField(max_length=255, blank=True, null=True)
-    phone = models.CharField(max_length=15, blank=True, null=True)
-    experience = models.CharField(max_length=50, blank=True, null=True)
-    joining_date = models.DateField(blank=True, null=True)
-    salary = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+
+    role = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True
+    )
+
+    specialization = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True
+    )
+
+    phone = models.CharField(
+        max_length=15,
+        blank=True,
+        null=True
+    )
+
+    experience = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True
+    )
+
+    joining_date = models.DateField(
+        blank=True,
+        null=True
+    )
+
+    salary = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0
+    )
+
     status = models.CharField(
         max_length=10,
         choices=STATUS_CHOICES,
         default="Active"
     )
 
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.PROTECT,
+        related_name="staff_members",
+        null=True,
+        blank=True
+    )
 
-
-class Branch(models.Model):
-    name = models.CharField(max_length=255)
-    location = models.CharField(max_length=255)
-    manager_name = models.CharField(max_length=255, blank=True, null=True)
-    phone = models.CharField(max_length=20, blank=True, null=True)
-    capacity = models.IntegerField(blank=True, null=True)
-
-
-class Payment(models.Model):
+    def __str__(self):
+        return self.name or "Staff"
+    
+class Payment(TenantBaseModel):
     member = models.ForeignKey(Member,on_delete=models.CASCADE,null=True,blank=True)
     staff = models.ForeignKey(Staffs,on_delete=models.CASCADE,null=True,blank=True)
     PAYMENT_METHOD_CHOICES = [
@@ -125,9 +210,7 @@ class Payment(models.Model):
     payment_method = models.CharField(max_length=50,choices=PAYMENT_METHOD_CHOICES,blank=True,null=True)
     payment_type = models.CharField(max_length=100,blank=True,null=True)
 
-
-
-class Expense(models.Model):
+class Expense(TenantBaseModel):
 
     CATEGORY_CHOICES = [
         ("salary", "Salary"),
@@ -145,37 +228,18 @@ class Expense(models.Model):
         ("card", "Card"),
         ("bank", "Bank Transfer"),
     ]
-
     title = models.CharField(max_length=100)
     name = models.CharField(max_length=100)
     phone = models.CharField(max_length=20, blank=True, null=True)
-
-    category = models.CharField(
-        max_length=50,
-        choices=CATEGORY_CHOICES
-    )
-
+    category = models.CharField(max_length=50,choices=CATEGORY_CHOICES)
     description = models.TextField(blank=True, null=True)
-
-    amount = models.DecimalField(
-        max_digits=10,
-        decimal_places=2
-    )
-
-    payment_method = models.CharField(
-        max_length=20,
-        choices=PAYMENT_METHOD_CHOICES,
-        default="cash"
-    )
-
+    amount = models.DecimalField(max_digits=10, decimal_places=5)
+    payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
     date = models.DateField()
-
-    # True for salary entries created automatically
-    # False for manually added expenses
     is_system_generated = models.BooleanField(default=False)
 
 
-class Income(models.Model):
+class Income(TenantBaseModel):
 
     CATEGORY_CHOICES = [
         ("membership", "Membership Fee"),
@@ -199,33 +263,9 @@ class Income(models.Model):
     amount = models.DecimalField(max_digits=10,decimal_places=2)
     payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
     date = models.DateTimeField(auto_now_add=True)
-
-    # True when generated automatically (example: product sale/member payment)
-    # False when manually added
     is_system_generated = models.BooleanField(default=False)
 
-
-
-class TrainerPayment(models.Model):
-    trainer = models.ForeignKey(
-        Trainer,
-        on_delete=models.CASCADE,
-        db_column='trainer_id'
-    )
-    amount = models.FloatField()
-    payment_date = models.CharField(max_length=50)
-    payment_method = models.CharField(max_length=100, blank=True, null=True)
-    type = models.CharField(max_length=100, blank=True, null=True)
-    notes = models.TextField(blank=True, null=True)
-    for_month = models.CharField(max_length=50, blank=True, null=True)
-
-
-
-# class Setting(models.Model):
-#     key = models.CharField(max_length=255, primary_key=True)
-#     value = models.TextField()
-
-class Product(models.Model):
+class Product(TenantBaseModel):
     name = models.CharField(max_length=255)
     CATEGORY_CHOICES = [
         ("supplements", "Supplements"),
@@ -238,17 +278,13 @@ class Product(models.Model):
     description = models.TextField(blank=True, null=True)
     price = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.IntegerField(default=0)
-    category = models.CharField(
-        max_length=50,
-        choices=CATEGORY_CHOICES,
-        default="supplements"
-    )
+    category = models.CharField(max_length=50,choices=CATEGORY_CHOICES,default="supplements")
     image = CloudinaryField("image",blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     # payment_method = models.CharField(max_length=20, default="cash")
 
 
-class Sales_product(models.Model):
+class Sales_product(TenantBaseModel):
     member = models.ForeignKey(Member,on_delete=models.SET_NULL,null=True,blank=True)
     product = models.ForeignKey(Product, on_delete=models.CASCADE)
     quantity = models.PositiveIntegerField()
@@ -257,49 +293,13 @@ class Sales_product(models.Model):
     sold_at = models.DateTimeField(auto_now_add=True)
     payment_method = models.CharField(max_length=20, default="cash")
 
-
-class Enquiry(models.Model):
+class Enquiry(TenantBaseModel):
     name = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20)
     plan=models.CharField(max_length=100, null=True, blank=True)
     date = models.CharField(max_length=50, blank=True, null=True)
 
-    
-class DietPlanPDF(models.Model):
-
-    member = models.ForeignKey(
-        Member,
-        on_delete=models.CASCADE
-    )
-
-    pdf = models.FileField(
-        upload_to="diet_plans/"
-    )
-
-    created_at = models.DateTimeField(
-        auto_now_add=True
-    )
-
-
-class Exercises(models.Model):
-    name = models.CharField(max_length=150)
-    body_part = models.CharField(max_length=100)
-    equipment = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-    image = CloudinaryField(
-        "image",
-        blank=True,
-        null=True
-    )
-
-    def __str__(self):
-        return self.name
-
-
-class GymEquipment(models.Model):
+class GymEquipment(TenantBaseModel):
     name = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField(default=1)
     is_available = models.BooleanField(default=True)
