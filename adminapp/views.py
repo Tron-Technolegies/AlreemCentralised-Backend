@@ -1475,13 +1475,17 @@ def delete_member(request, member_id):
 @permission_classes([IsAuthenticated])
 def create_plan(request):
 
-    # Only SUPER_ADMIN and TENANT_ADMIN can create plans
+    # SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN can create
     if not (
         request.user.is_superuser
-        or request.user.role in ["SUPER_ADMIN", "TENANT_ADMIN"]
+        or request.user.role in [
+            "SUPER_ADMIN",
+            "TENANT_ADMIN",
+            "BRANCH_ADMIN"
+        ]
     ):
         return JsonResponse(
-            {"error": "Only super admin or tenant admin can create plans"},
+            {"error": "You do not have permission to create plans"},
             status=403
         )
 
@@ -1495,17 +1499,21 @@ def create_plan(request):
             status=400
         )
 
-    # Super admin → global plan
-    if request.user.is_superuser or request.user.role == "SUPER_ADMIN":
+    # SUPER_ADMIN → global plan
+    if (
+        request.user.is_superuser
+        or request.user.role == "SUPER_ADMIN"
+    ):
         Plan.objects.create(
             tenant=None,
             name=name,
             duration=duration,
-            price=price,
+            price=price
         )
 
-    # Tenant admin → plan belongs to their tenant
+    # TENANT_ADMIN / BRANCH_ADMIN → their tenant
     else:
+
         if not request.user.tenant_id:
             return JsonResponse(
                 {"error": "User is not assigned to a tenant"},
@@ -1516,7 +1524,7 @@ def create_plan(request):
             tenant=request.user.tenant,
             name=name,
             duration=duration,
-            price=price,
+            price=price
         )
 
     return JsonResponse(
@@ -1524,26 +1532,45 @@ def create_plan(request):
         status=201
     )
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_plans(request):
-    tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing plans"},
-            status=400
+    # SUPER_ADMIN → see ALL plans
+    if (
+        request.user.is_superuser
+        or request.user.role == "SUPER_ADMIN"
+    ):
+        plans = list(
+            Plan.objects
+            .all()
+            .order_by("id")
+            .values()
         )
 
-    if tenant is None:
+        return JsonResponse(plans, safe=False)
+
+    # TENANT_ADMIN / BRANCH_ADMIN / STAFF
+    if not request.user.tenant_id:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
+    # Tenant users can see:
+    # 1. Global plans
+    # 2. Their own tenant plans
     plans = list(
         Plan.objects
-        .filter(tenant=tenant)
+        .filter(
+            tenant__isnull=True
+        )
+        .union(
+            Plan.objects.filter(
+                tenant=request.user.tenant
+            )
+        )
         .order_by("id")
         .values()
     )
@@ -1554,80 +1581,118 @@ def get_plans(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_plan(request, plan_id):
-    tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    # SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN can update
+    if not (
+        request.user.is_superuser
+        or request.user.role in [
+            "SUPER_ADMIN",
+            "TENANT_ADMIN",
+            "BRANCH_ADMIN"
+        ]
+    ):
         return JsonResponse(
-            {"error": "Please select a tenant before updating a plan"},
-            status=400
-        )
-
-    if tenant is None:
-        return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
-            status=403
-        )
-
-    if request.user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
-    ]:
-        return JsonResponse(
-            {"error": "Only Super Admin or Tenant Admin can update plans"},
+            {"error": "You do not have permission to update plans"},
             status=403
         )
 
     try:
-        plan = Plan.objects.get(
-            id=plan_id,
-            tenant=tenant
-        )
+
+        # SUPER_ADMIN → can update ANY plan
+        if (
+            request.user.is_superuser
+            or request.user.role == "SUPER_ADMIN"
+        ):
+            plan = Plan.objects.get(id=plan_id)
+
+        else:
+            # Tenant/Branch admin → only their tenant's plans
+            if not request.user.tenant_id:
+                return JsonResponse(
+                    {"error": "User is not assigned to a tenant"},
+                    status=403
+                )
+
+            plan = Plan.objects.get(
+                id=plan_id,
+                tenant=request.user.tenant
+            )
+
     except Plan.DoesNotExist:
         return JsonResponse(
             {"error": "Plan not found"},
             status=404
         )
 
-    plan.name = request.POST.get("name")
-    plan.duration = request.POST.get("duration")
-    plan.price = request.POST.get("price")
+    name = request.data.get("name")
+    duration = request.data.get("duration")
+    price = request.data.get("price")
+
+    if name:
+        plan.name = name
+
+    if duration:
+        plan.duration = duration
+
+    if price:
+        plan.price = price
+
     plan.save()
 
-    return JsonResponse({
-        "message": "Plan updated successfully"
-    })
+    return JsonResponse(
+        {"message": "Plan updated successfully"},
+        status=200
+    )
+
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_plan(request, plan_id):
-    tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    # STAFF is NOT allowed to delete
+    if request.user.role == "STAFF":
         return JsonResponse(
-            {"error": "Please select a tenant before deleting a plan"},
-            status=400
-        )
-
-    if tenant is None:
-        return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
+            {"error": "Staff cannot delete plans"},
             status=403
         )
 
-    if request.user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
-    ]:
+    # Only SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN
+    # can delete
+    if not (
+        request.user.is_superuser
+        or request.user.role in [
+            "SUPER_ADMIN",
+            "TENANT_ADMIN",
+            "BRANCH_ADMIN"
+        ]
+    ):
         return JsonResponse(
-            {"error": "Only Super Admin or Tenant Admin can delete plans"},
+            {"error": "You do not have permission to delete plans"},
             status=403
         )
 
     try:
-        plan = Plan.objects.get(
-            id=plan_id,
-            tenant=tenant
-        )
+
+        # SUPER_ADMIN → can delete ANY plan
+        if (
+            request.user.is_superuser
+            or request.user.role == "SUPER_ADMIN"
+        ):
+            plan = Plan.objects.get(id=plan_id)
+
+        else:
+            # Tenant/Branch admin → only their tenant's plans
+            if not request.user.tenant_id:
+                return JsonResponse(
+                    {"error": "User is not assigned to a tenant"},
+                    status=403
+                )
+
+            plan = Plan.objects.get(
+                id=plan_id,
+                tenant=request.user.tenant
+            )
+
     except Plan.DoesNotExist:
         return JsonResponse(
             {"error": "Plan not found"},
@@ -1636,9 +1701,10 @@ def delete_plan(request, plan_id):
 
     plan.delete()
 
-    return JsonResponse({
-        "message": "Plan deleted successfully"
-    })
+    return JsonResponse(
+        {"message": "Plan deleted successfully"},
+        status=200
+    )
 
 
 @api_view(["POST"])
