@@ -1471,6 +1471,7 @@ def delete_member(request, member_id):
         status=200
     )
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_plan(request):
@@ -1707,32 +1708,49 @@ def delete_plan(request, plan_id):
     )
 
 
+from django.http import JsonResponse
+from django.db.models import Q
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+
+# =========================================================
+# CREATE BRANCH
+# SUPER_ADMIN       -> Yes
+# TENANT_ADMIN      -> Yes
+# BRANCH_ADMIN      -> Yes
+# STAFF             -> No
+# =========================================================
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_branch(request):
-    tenant = get_tenant(request)
 
-    if (
-        request.user.is_superuser
-        or request.user.role == "SUPER_ADMIN"
-    ) and tenant is None:
+    tenant = get_tenant(request)
+    user = request.user
+
+    # SUPER_ADMIN must select a tenant
+    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before creating a branch"},
             status=400
         )
 
+    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    if not (
-        request.user.is_superuser
-        or request.user.role in ["SUPER_ADMIN", "TENANT_ADMIN"]
-    ):
+    # BRANCH_ADMIN is also allowed to create branches
+    if user.role not in [
+        "SUPER_ADMIN",
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN"
+    ] and not user.is_superuser:
         return JsonResponse(
-            {"error": "Only tenant admins can create branches"},
+            {"error": "You are not permitted to create branches"},
             status=403
         )
 
@@ -1754,20 +1772,35 @@ def create_branch(request):
         capacity=capacity,
     )
 
-    return JsonResponse({"message": "success"}, status=201)
+    return JsonResponse(
+        {"message": "success"},
+        status=201
+    )
+
+
+# =========================================================
+# GET BRANCHES
+# SUPER_ADMIN       -> All branches in selected tenant
+# TENANT_ADMIN      -> All branches in their tenant
+# BRANCH_ADMIN      -> Own branch only
+# STAFF             -> Own branch only
+# =========================================================
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branches(request):
+
     tenant = get_tenant(request)
     user = request.user
 
-    if user.role == "SUPER_ADMIN" and tenant is None:
+    # SUPER_ADMIN must select a tenant
+    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before viewing branches"},
             status=400
         )
 
+    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -1776,7 +1809,9 @@ def get_branches(request):
 
     qs = Branch.objects.filter(tenant=tenant)
 
+    # BRANCH_ADMIN and STAFF -> own branch only
     if user.role in ["BRANCH_ADMIN", "STAFF"]:
+
         if not user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -1789,18 +1824,34 @@ def get_branches(request):
         qs.order_by("id").values()
     )
 
-    return JsonResponse(branches, safe=False)
+    return JsonResponse(
+        branches,
+        safe=False
+    )
 
+
+# =========================================================
+# GET BRANCH MEMBERS
+# SUPER_ADMIN       -> Any branch in selected tenant
+# TENANT_ADMIN      -> Any branch in their tenant
+# BRANCH_ADMIN      -> Own branch only
+# STAFF             -> Own branch only
+# =========================================================
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branch_members(request, branch_id):
+
     tenant = get_tenant(request)
+    user = request.user
 
     # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
         return JsonResponse(
-            {"error": "Please select a tenant before viewing branch members"},
+            {
+                "error":
+                "Please select a tenant before viewing branch members"
+            },
             status=400
         )
 
@@ -1811,7 +1862,7 @@ def get_branch_members(request, branch_id):
             status=403
         )
 
-    # Get branch only from the selected tenant
+    # Get branch only from selected tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
@@ -1823,15 +1874,23 @@ def get_branch_members(request, branch_id):
             status=404
         )
 
-    # BRANCH_ADMIN and STAFF can access only their own branch
-    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
-        if request.user.branch_id != branch.id:
+    # BRANCH_ADMIN and STAFF -> own branch only
+    if user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if not user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        if user.branch_id != branch.id:
             return JsonResponse(
                 {"error": "You are not permitted to access this branch"},
                 status=403
             )
 
     try:
+
         members = (
             Member.objects
             .filter(
@@ -1847,6 +1906,7 @@ def get_branch_members(request, branch_id):
                 "name": m.name,
                 "phone": m.phone,
                 "email": m.email,
+
                 "plan": {
                     "id": m.plan.id,
                     "name": m.plan.name,
@@ -1867,55 +1927,69 @@ def get_branch_members(request, branch_id):
         })
 
     except Exception as e:
+
         return JsonResponse(
             {"error": str(e)},
             status=500
         )
+
+
+# =========================================================
+# UPDATE BRANCH
+# SUPER_ADMIN       -> Any branch
+# TENANT_ADMIN      -> Any branch in tenant
+# BRANCH_ADMIN      -> Own branch only
+# STAFF             -> No
+# =========================================================
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_branch(request, branch_id):
+
     tenant = get_tenant(request)
     user = request.user
 
     # SUPER_ADMIN must select a tenant
-    if user.role == "SUPER_ADMIN" and tenant is None:
+    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before updating a branch"},
             status=400
         )
 
-    # All other users must belong to a tenant
+    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # Only these roles can update branches
+    # STAFF cannot update
     if user.role not in [
         "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
-    ]:
+    ] and not user.is_superuser:
         return JsonResponse(
             {"error": "You are not permitted to update branches"},
             status=403
         )
 
-    # Get branch only from the selected tenant
+    # Get branch only from selected tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
             tenant=tenant
         )
     except Branch.DoesNotExist:
+
         return JsonResponse(
             {"error": "Branch not found"},
             status=404
         )
 
-    # BRANCH_ADMIN can update ONLY their own branch
+    # BRANCH_ADMIN -> own branch only
     if user.role == "BRANCH_ADMIN":
+
         if not user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -1928,7 +2002,7 @@ def update_branch(request, branch_id):
                 status=403
             )
 
-    # Update branch fields
+    # Update existing fields
     branch.name = request.POST.get("name")
     branch.location = request.POST.get("location")
     branch.manager_name = request.POST.get("manager_name")
@@ -1942,38 +2016,53 @@ def update_branch(request, branch_id):
     })
 
 
+# =========================================================
+# DELETE BRANCH
+# SUPER_ADMIN       -> Yes
+# TENANT_ADMIN      -> Yes
+# BRANCH_ADMIN      -> No
+# STAFF             -> No
+# =========================================================
+
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_branch(request, branch_id):
-    tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    tenant = get_tenant(request)
+    user = request.user
+
+    # SUPER_ADMIN must select a tenant
+    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before deleting a branch"},
             status=400
         )
 
+    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    if request.user.role not in [
+    # Only SUPER_ADMIN and TENANT_ADMIN can delete
+    if user.role not in [
         "SUPER_ADMIN",
         "TENANT_ADMIN"
-    ]:
+    ] and not user.is_superuser:
         return JsonResponse(
             {"error": "Not permitted"},
             status=403
         )
 
+    # Get branch only from selected tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
             tenant=tenant
         )
     except Branch.DoesNotExist:
+
         return JsonResponse(
             {"error": "Branch not found"},
             status=404
@@ -1984,7 +2073,6 @@ def delete_branch(request, branch_id):
     return JsonResponse({
         "message": "Branch deleted successfully"
     })
-
 
 
 from datetime import date, datetime, timedelta
