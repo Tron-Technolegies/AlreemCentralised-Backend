@@ -1476,7 +1476,12 @@ def delete_member(request, member_id):
 def create_plan(request):
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    # Super admin has global access but must select
+    # which tenant the plan belongs to.
+    if (
+        request.user.is_superuser
+        or request.user.role == "SUPER_ADMIN"
+    ) and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before creating a plan"},
             status=400
@@ -1488,7 +1493,11 @@ def create_plan(request):
             status=403
         )
 
-    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+    # Only SUPER_ADMIN and TENANT_ADMIN can create plans
+    if not (
+        request.user.is_superuser
+        or request.user.role in ["SUPER_ADMIN", "TENANT_ADMIN"]
+    ):
         return JsonResponse(
             {"error": "Only tenant admins can create plans"},
             status=403
@@ -1502,7 +1511,6 @@ def create_plan(request):
     )
 
     return JsonResponse({"message": "success"}, status=201)
-
 
 
 @api_view(["GET"])
@@ -1627,7 +1635,10 @@ def delete_plan(request, plan_id):
 def create_branch(request):
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
+    if (
+        request.user.is_superuser
+        or request.user.role == "SUPER_ADMIN"
+    ) and tenant is None:
         return JsonResponse(
             {"error": "Please select a tenant before creating a branch"},
             status=400
@@ -1639,7 +1650,10 @@ def create_branch(request):
             status=403
         )
 
-    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+    if not (
+        request.user.is_superuser
+        or request.user.role in ["SUPER_ADMIN", "TENANT_ADMIN"]
+    ):
         return JsonResponse(
             {"error": "Only tenant admins can create branches"},
             status=403
