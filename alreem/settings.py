@@ -58,6 +58,16 @@ REST_FRAMEWORK = {
 
 from datetime import timedelta
 
+# settings.py
+
+EBIOSERVER_API_URL = os.getenv(
+    "EBIOSERVER_API_URL",
+    "https://app.ebioserver.com/api/v1"
+)
+
+EBIOSERVER_API_KEY = os.getenv("EBIOSERVER_API_KEY")
+EBIOSERVER_API_SECRET = os.getenv("EBIOSERVER_API_SECRET")
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(days=1),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),

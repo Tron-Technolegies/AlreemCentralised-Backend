@@ -237,6 +237,14 @@ class Expense(TenantBaseModel):
     payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
     date = models.DateField()
     is_system_generated = models.BooleanField(default=False)
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="expenses",
+        null=True,
+        blank=True
+    )
+
 
 
 class Income(TenantBaseModel):
@@ -264,6 +272,13 @@ class Income(TenantBaseModel):
     payment_method = models.CharField(max_length=20,choices=PAYMENT_METHOD_CHOICES,default="cash")
     date = models.DateTimeField(auto_now_add=True)
     is_system_generated = models.BooleanField(default=False)
+    branch = models.ForeignKey(
+    Branch,
+    on_delete=models.CASCADE,
+    related_name="incomes",
+    null=True,
+    blank=True
+    )
 
 class Product(TenantBaseModel):
     name = models.CharField(max_length=255)
@@ -281,6 +296,13 @@ class Product(TenantBaseModel):
     category = models.CharField(max_length=50,choices=CATEGORY_CHOICES,default="supplements")
     image = CloudinaryField("image",blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="products",
+        null=True,
+        blank=True
+        )
     # payment_method = models.CharField(max_length=20, default="cash")
 
 
@@ -292,6 +314,13 @@ class Sales_product(TenantBaseModel):
     total_amount = models.DecimalField(max_digits=10, decimal_places=2)
     sold_at = models.DateTimeField(auto_now_add=True)
     payment_method = models.CharField(max_length=20, default="cash")
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="product_sales",
+        null=True,
+        blank=True
+    )
 
 class Enquiry(TenantBaseModel):
     name = models.CharField(max_length=255, null=True, blank=True)
