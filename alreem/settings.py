@@ -126,16 +126,16 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 #     }
 # }
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME'),
-        'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
-        'USER': os.getenv('DB_USER'),
-        'PASSWORD': os.getenv('DB_PASSWORD'),
-    }
-}
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.postgresql',
+#         'NAME': os.getenv('DB_NAME'),
+#         'HOST': os.getenv('DB_HOST'),
+#         'PORT': os.getenv('DB_PORT'),
+#         'USER': os.getenv('DB_USER'),
+#         'PASSWORD': os.getenv('DB_PASSWORD'),
+#     }
+# }
 
 # DATABASES = {
 #     "default": {
@@ -148,13 +148,14 @@ EXERCISE_API_KEY = os.getenv(
     "EXERCISE_API_KEY"
 )
 
-# import dj_database_url
+import dj_database_url
 
-# DATABASES = {
-#     "default": dj_database_url.config(
-#         default=os.environ.get("DATABASE_URL")
-#     )
-# }
+DATABASES = {
+    "default": dj_database_url.config(
+        default=os.environ.get("DB_URL")
+    )
+}
+
 # GENERATE_EXERCISE_IMAGES = False
 HF_TOKEN = os.getenv("HF_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
