@@ -28,10 +28,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-5nvvk#cf&l(2f)v583u6vl&a5)6$#q81n#(f*r#%e#64@!luo#'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# DEBUG = True
 
-# ALLOWED_HOSTS = ['alreemcentralised-backend.onrender.com']
-ALLOWED_HOSTS = []
+DEBUG = False
+
+ALLOWED_HOSTS = [
+    "alreemcentralised-backend.onrender.com",
+    "localhost",
+    "127.0.0.1",
+]
 
 
 # Application definition
@@ -156,7 +161,7 @@ DATABASES = {
     )
 }
 
-# GENERATE_EXERCISE_IMAGES = False
+# GENERATE_EXERCISE_IMAGES = FALse
 HF_TOKEN = os.getenv("HF_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
