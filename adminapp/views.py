@@ -1474,24 +1474,6 @@ def delete_member(request, member_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_plan(request):
-    tenant = get_tenant(request)
-
-    # Super admin has global access but must select
-    # which tenant the plan belongs to.
-    if (
-        request.user.is_superuser
-        or request.user.role == "SUPER_ADMIN"
-    ) and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before creating a plan"},
-            status=400
-        )
-
-    if tenant is None:
-        return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
-            status=403
-        )
 
     # Only SUPER_ADMIN and TENANT_ADMIN can create plans
     if not (
@@ -1499,19 +1481,48 @@ def create_plan(request):
         or request.user.role in ["SUPER_ADMIN", "TENANT_ADMIN"]
     ):
         return JsonResponse(
-            {"error": "Only tenant admins can create plans"},
+            {"error": "Only super admin or tenant admin can create plans"},
             status=403
         )
 
-    Plan.objects.create(
-        tenant=tenant,
-        name=request.POST.get("name"),
-        duration=request.POST.get("duration"),
-        price=request.POST.get("price"),
+    name = request.data.get("name")
+    duration = request.data.get("duration")
+    price = request.data.get("price")
+
+    if not name or not duration or not price:
+        return JsonResponse(
+            {"error": "Name, duration and price are required"},
+            status=400
+        )
+
+    # Super admin → global plan
+    if request.user.is_superuser or request.user.role == "SUPER_ADMIN":
+        Plan.objects.create(
+            tenant=None,
+            name=name,
+            duration=duration,
+            price=price,
+        )
+
+    # Tenant admin → plan belongs to their tenant
+    else:
+        if not request.user.tenant_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a tenant"},
+                status=403
+            )
+
+        Plan.objects.create(
+            tenant=request.user.tenant,
+            name=name,
+            duration=duration,
+            price=price,
+        )
+
+    return JsonResponse(
+        {"message": "Plan created successfully"},
+        status=201
     )
-
-    return JsonResponse({"message": "success"}, status=201)
-
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
