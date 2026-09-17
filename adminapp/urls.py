@@ -33,8 +33,7 @@ urlpatterns = [
     path('members/resume/<str:member_id>/',views.resume_member, name="resume_member"),
     path('members/<str:member_id>/renew/', views.renew_member, name='renew_member'),
 
-    path('expenses/', views.add_expense, name='add_expense'),
-    path('view_expenses/', views.view_expenses, name='view_expenses'),
+    # path('view_expenses/', views.view_expenses, name='view_expenses'),
 
     path('blocked_members/', views.get_blocked_members, name='blocked_members'),
     path("expiring_soon_members/", views.expiring_soon_members, name='expiring_soon_members'),
@@ -77,9 +76,17 @@ urlpatterns = [
     path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
     path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
 #    path("gym-equipment/create/",views.create_gym_equipment ),
+    path(
+        "gym-equipment/",
+        views.gym_equipment,
+        name="gym_equipment"
+    ),
 
-    path("gym-equipment/",views.gym_equipment,name="gym_equipment"),
-    path("gym-equipment/<int:equipment_id>/",views.gym_equipment_detail,name="gym_equipment_detail"),
+    path(
+        "gym-equipment/<int:equipment_id>/",
+        views.gym_equipment_detail,
+        name="gym_equipment_detail"
+    ),
 
     path("generate-diet/",views.generate_diet,name="generate-diet"),
     path("generate_workout/",views.generate_workout,name="generate_workout"),

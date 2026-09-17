@@ -16,6 +16,7 @@ User = get_user_model()
 
 from django.http import JsonResponse
 from django.contrib.auth.decorators import login_required
+from django.http import JsonResponse
 from functools import wraps
 
 
@@ -36,10 +37,8 @@ def role_required(allowed_roles):
                     status=403
                 )
 
-            if (
-                request.user.role != "SUPER_ADMIN"
-                and request.user.tenant_id is None
-            ):
+            # Every application role must belong to a tenant
+            if request.user.tenant_id is None:
                 return JsonResponse(
                     {"error": "User is not assigned to a tenant"},
                     status=403
@@ -56,13 +55,7 @@ def get_user_scope(user):
     Returns the tenant and branch scope for the logged-in user.
     """
 
-    if user.role == "SUPER_ADMIN":
-        return {
-            "tenant": None,
-            "branch": None,
-            "all_access": True,
-        }
-
+    # TENANT_ADMIN can access everything inside their tenant
     if user.role == "TENANT_ADMIN":
         return {
             "tenant": user.tenant,
@@ -70,6 +63,7 @@ def get_user_scope(user):
             "all_access": False,
         }
 
+    # BRANCH_ADMIN and STAFF are restricted to their assigned branch
     if user.role in ["BRANCH_ADMIN", "STAFF"]:
         return {
             "tenant": user.tenant,
@@ -82,7 +76,6 @@ def get_user_scope(user):
         "branch": None,
         "all_access": False,
     }
-
 
 import csv
 import io
@@ -198,7 +191,6 @@ class IsSuperAdmin(BasePermission):
 # ============================================================
 # LOGIN — now embeds tenant/role/branch in the token + response
 # ============================================================
-
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def admin_login(request):
@@ -206,20 +198,29 @@ def admin_login(request):
     password = request.data.get("password")
 
     if not username or not password:
-        return JsonResponse({"error": "Username and password are required"}, status=404)
+        return JsonResponse(
+            {"error": "Username and password are required"},
+            status=404
+        )
 
     user = authenticate(username=username, password=password)
 
     if user is None:
-        return JsonResponse({"error": "Invalid username or password"}, status=401)
+        return JsonResponse(
+            {"error": "Invalid username or password"},
+            status=401
+        )
 
-    if not user.is_superuser and not getattr(user, "tenant_id", None):
-        # Every non-superuser account must belong to a tenant to log in
-        return JsonResponse({"error": "This account is not linked to any gym."}, status=403)
+    # Every application role must belong to a tenant
+    if not getattr(user, "tenant_id", None):
+        return JsonResponse(
+            {"error": "This account is not linked to any gym."},
+            status=403
+        )
 
     refresh = RefreshToken.for_user(user)
 
-    # Embed tenant context in the JWT itself so DRF auth alone carries it
+    # Embed tenant context in the JWT itself
     refresh["tenant_id"] = user.tenant_id
     refresh["role"] = getattr(user, "role", None)
     refresh["branch_id"] = getattr(user, "branch_id", None)
@@ -237,9 +238,17 @@ def admin_login(request):
                 "is_superuser": user.is_superuser,
                 "role": getattr(user, "role", None),
                 "tenant_id": user.tenant_id,
-                "tenant_name": user.tenant.name if getattr(user, "tenant", None) else None,
+                "tenant_name": (
+                    user.tenant.name
+                    if getattr(user, "tenant", None)
+                    else None
+                ),
                 "branch_id": getattr(user, "branch_id", None),
-                "branch_name": user.branch.name if getattr(user, "branch", None) else None,
+                "branch_name": (
+                    user.branch.name
+                    if getattr(user, "branch", None)
+                    else None
+                ),
             },
         },
         status=200,
@@ -270,7 +279,6 @@ def change_password(request):
     user.save()
 
     return JsonResponse({"message": "Password changed successfully"}, status=200)
-
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -308,13 +316,7 @@ from .tenant_utils import get_tenant, get_branch_filter
 def create_member(request):
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before creating a member"},
-            status=400
-        )
-
+    # Every application role must have a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -447,7 +449,7 @@ def create_member(request):
             branch_id = request.user.branch_id
 
         else:
-            # TENANT_ADMIN / SUPER_ADMIN
+            # TENANT_ADMIN
             try:
                 branch = Branch.objects.get(
                     id=branch_id,
@@ -572,7 +574,6 @@ def create_member(request):
         member = Member.objects.create(
 
             # Tenant is ALWAYS taken from authenticated user
-            # / selected tenant.
             tenant=tenant,
 
             id=next_id,
@@ -645,17 +646,28 @@ def create_member(request):
             status=500
         )
 
+
 def auto_resume_member(member, today):
     if member.is_paused and member.pause_expiry_date:
         if today >= member.pause_expiry_date:
-            active_pause = MemberPause.objects.filter(member=member, end_date__isnull=True).first()
+            active_pause = MemberPause.objects.filter(
+                member=member,
+                end_date__isnull=True
+            ).first()
+
             if active_pause:
-                paused_days = (today - active_pause.start_date).days
+                paused_days = (
+                    today - active_pause.start_date
+                ).days
+
                 active_pause.end_date = today
                 active_pause.paused_days = paused_days
                 active_pause.save()
+
                 if member.expiry_date:
-                    member.expiry_date += timedelta(days=paused_days)
+                    member.expiry_date += timedelta(
+                        days=paused_days
+                    )
 
             member.is_paused = False
             member.pause_start_date = None
@@ -670,12 +682,9 @@ def get_members(request):
     tenant = get_tenant(request)
     today = date.today()
 
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing members"},
-            status=400
-        )
+    # -------------------------------------------------
+    # Tenant validation
+    # -------------------------------------------------
 
     if tenant is None:
         return JsonResponse(
@@ -884,14 +893,9 @@ def get_member(request, member_id):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN without tenant selection
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "error": "Please select a tenant"
-            },
-            status=400
-        )
+    # -------------------------------------------------
+    # Tenant validation
+    # -------------------------------------------------
 
     if tenant is None:
         return JsonResponse(
@@ -1069,21 +1073,11 @@ def get_member(request, member_id):
             },
             status=500
         )
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_member(request, member_id):
 
     tenant = get_tenant(request)
-
-    # SUPER_ADMIN without tenant selection
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "error": "Please select a tenant"
-            },
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -1254,23 +1248,33 @@ def update_member(request, member_id):
         else:
 
             join_date = member.join_date
+
             if isinstance(join_date, str):
+
                 try:
 
                     join_date = datetime.strptime(
                         join_date,
                         "%Y-%m-%d"
                     ).date()
+
                 except ValueError:
 
                     join_date = None
+
+        # -------------------------------------------------
+        # Height / Weight / BMI
+        # -------------------------------------------------
+
         try:
+
             weight = float(
                 request.data.get(
                     "weight",
                     member.weight or 0
                 ) or 0
             )
+
             height = float(
                 request.data.get(
                     "height",
@@ -1279,6 +1283,7 @@ def update_member(request, member_id):
             )
 
         except ValueError:
+
             return JsonResponse(
                 {
                     "error":
@@ -1298,6 +1303,11 @@ def update_member(request, member_id):
                 (height_m * height_m),
                 2
             )
+
+        # -------------------------------------------------
+        # Paid amount
+        # -------------------------------------------------
+
         try:
 
             paid_amount = float(
@@ -1306,6 +1316,7 @@ def update_member(request, member_id):
                     member.paid_amount or 0
                 ) or 0
             )
+
         except ValueError:
 
             return JsonResponse(
@@ -1317,6 +1328,7 @@ def update_member(request, member_id):
             )
 
         if paid_amount < 0:
+
             return JsonResponse(
                 {
                     "error":
@@ -1324,11 +1336,17 @@ def update_member(request, member_id):
                 },
                 status=400
             )
+
+        # -------------------------------------------------
+        # Plan amount
+        # -------------------------------------------------
+
         plan_amount = float(
             selected_plan.price or 0
         )
 
         if paid_amount > plan_amount:
+
             return JsonResponse(
                 {
                     "error":
@@ -1341,8 +1359,15 @@ def update_member(request, member_id):
             plan_amount - paid_amount,
             0
         )
+
+        # -------------------------------------------------
+        # Expiry date
+        # -------------------------------------------------
+
         expiry_date = member.expiry_date
+
         if join_date and selected_plan:
+
             duration = int(
                 selected_plan.duration or 0
             )
@@ -1351,16 +1376,33 @@ def update_member(request, member_id):
                 join_date +
                 timedelta(days=duration)
             )
+
+        # -------------------------------------------------
+        # Update member
+        # -------------------------------------------------
+
         member.name = name
+
         member.phone = phone
+
         member.email = email
+
         member.plan = selected_plan
+
         member.height = height
+
         member.weight = weight
+
         member.bmi = bmi
+
         member.goal = goal
+
         member.food_category = food_category
-        member.age = request.data.get("age",member.age)
+
+        member.age = request.data.get(
+            "age",
+            member.age
+        )
 
         member.blood_group = request.data.get(
             "blood_group",
@@ -1381,15 +1423,27 @@ def update_member(request, member_id):
             "gender",
             member.gender
         )
+
         member.paid_amount = paid_amount
+
         member.due_amount = due_amount
+
         if join_date:
             member.join_date = join_date
+
         member.expiry_date = expiry_date
+
+        # -------------------------------------------------
+        # Photo
+        # -------------------------------------------------
+
         photo = request.FILES.get("photo")
+
         if photo:
             member.photo = photo
+
         member.save()
+
         return JsonResponse(
             {
                 "message":
@@ -1400,6 +1454,7 @@ def update_member(request, member_id):
             },
             status=200
         )
+
     except Member.DoesNotExist:
 
         return JsonResponse(
@@ -1409,7 +1464,9 @@ def update_member(request, member_id):
             },
             status=404
         )
+
     except Exception as e:
+
         return JsonResponse(
             {
                 "error":
@@ -1422,51 +1479,80 @@ def update_member(request, member_id):
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_member(request, member_id):
+
     tenant = get_tenant(request)
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before deleting a member"},
-            status=400
-        )
+
     if tenant is None:
+
         return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
+            {
+                "error":
+                "User is not assigned to a tenant"
+            },
             status=403
         )
+
+    # -------------------------------------------------
+    # STAFF cannot delete members
+    # -------------------------------------------------
 
     if request.user.role == "STAFF":
+
         return JsonResponse(
-            {"error": "Staff members are not allowed to delete members"},
+            {
+                "error":
+                "Staff members are not allowed to delete members"
+            },
             status=403
         )
 
+    # -------------------------------------------------
+    # Only TENANT_ADMIN and BRANCH_ADMIN can delete
+    # -------------------------------------------------
+
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
+
         return JsonResponse(
-            {"error": "Permission denied"},
+            {
+                "error":
+                "Permission denied"
+            },
             status=403
         )
+
     try:
+
         member = Member.objects.get(
             id=member_id,
             tenant=tenant,
-            **get_branch_filter(request, tenant)
+            **get_branch_filter(
+                request,
+                tenant
+            )
         )
 
     except Member.DoesNotExist:
 
         return JsonResponse(
-            {"error": "Member not found or access denied"},
+            {
+                "error":
+                "Member not found or access denied"
+            },
             status=404
         )
+
     member.delete()
+
     return JsonResponse(
         {
-            "message": "Member deleted successfully",
-            "member_id": member_id
+            "message":
+            "Member deleted successfully",
+
+            "member_id":
+            member_id
         },
         status=200
     )
@@ -1475,58 +1561,27 @@ def delete_member(request, member_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_plan(request):
+    tenant = get_tenant(request)
 
-    # SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN can create
-    if not (
-        request.user.is_superuser
-        or request.user.role in [
-            "SUPER_ADMIN",
-            "TENANT_ADMIN",
-            "BRANCH_ADMIN"
-        ]
-    ):
+    if tenant is None:
         return JsonResponse(
-            {"error": "You do not have permission to create plans"},
+            {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    name = request.data.get("name")
-    duration = request.data.get("duration")
-    price = request.data.get("price")
-
-    if not name or not duration or not price:
+    # Only Tenant Admin can create plans
+    if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
-            {"error": "Name, duration and price are required"},
-            status=400
+            {"error": "Only Tenant Admin can create plans"},
+            status=403
         )
 
-    # SUPER_ADMIN → global plan
-    if (
-        request.user.is_superuser
-        or request.user.role == "SUPER_ADMIN"
-    ):
-        Plan.objects.create(
-            tenant=None,
-            name=name,
-            duration=duration,
-            price=price
-        )
-
-    # TENANT_ADMIN / BRANCH_ADMIN → their tenant
-    else:
-
-        if not request.user.tenant_id:
-            return JsonResponse(
-                {"error": "User is not assigned to a tenant"},
-                status=403
-            )
-
-        Plan.objects.create(
-            tenant=request.user.tenant,
-            name=name,
-            duration=duration,
-            price=price
-        )
+    Plan.objects.create(
+        tenant=tenant,
+        name=request.POST.get("name"),
+        duration=request.POST.get("duration"),
+        price=request.POST.get("price"),
+    )
 
     return JsonResponse(
         {"message": "Plan created successfully"},
@@ -1537,87 +1592,51 @@ def create_plan(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_plans(request):
+    tenant = get_tenant(request)
 
-    # SUPER_ADMIN → see ALL plans
-    if (
-        request.user.is_superuser
-        or request.user.role == "SUPER_ADMIN"
-    ):
-        plans = list(
-            Plan.objects
-            .all()
-            .order_by("id")
-            .values()
-        )
-
-        return JsonResponse(plans, safe=False)
-
-    # TENANT_ADMIN / BRANCH_ADMIN / STAFF
-    if not request.user.tenant_id:
+    if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # Tenant users can see:
-    # 1. Global plans
-    # 2. Their own tenant plans
+    # All roles can view plans belonging to their tenant
     plans = list(
         Plan.objects
-        .filter(
-            tenant__isnull=True
-        )
-        .union(
-            Plan.objects.filter(
-                tenant=request.user.tenant
-            )
-        )
+        .filter(tenant=tenant)
         .order_by("id")
         .values()
     )
 
-    return JsonResponse(plans, safe=False)
+    return JsonResponse(
+        plans,
+        safe=False
+    )
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_plan(request, plan_id):
+    tenant = get_tenant(request)
 
-    # SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN can update
-    if not (
-        request.user.is_superuser
-        or request.user.role in [
-            "SUPER_ADMIN",
-            "TENANT_ADMIN",
-            "BRANCH_ADMIN"
-        ]
-    ):
+    if tenant is None:
         return JsonResponse(
-            {"error": "You do not have permission to update plans"},
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    # Only Tenant Admin can update plans
+    if request.user.role != "TENANT_ADMIN":
+        return JsonResponse(
+            {"error": "Only Tenant Admin can update plans"},
             status=403
         )
 
     try:
-
-        # SUPER_ADMIN → can update ANY plan
-        if (
-            request.user.is_superuser
-            or request.user.role == "SUPER_ADMIN"
-        ):
-            plan = Plan.objects.get(id=plan_id)
-
-        else:
-            # Tenant/Branch admin → only their tenant's plans
-            if not request.user.tenant_id:
-                return JsonResponse(
-                    {"error": "User is not assigned to a tenant"},
-                    status=403
-                )
-
-            plan = Plan.objects.get(
-                id=plan_id,
-                tenant=request.user.tenant
-            )
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
 
     except Plan.DoesNotExist:
         return JsonResponse(
@@ -1625,74 +1644,39 @@ def update_plan(request, plan_id):
             status=404
         )
 
-    name = request.data.get("name")
-    duration = request.data.get("duration")
-    price = request.data.get("price")
-
-    if name:
-        plan.name = name
-
-    if duration:
-        plan.duration = duration
-
-    if price:
-        plan.price = price
-
+    plan.name = request.POST.get("name")
+    plan.duration = request.POST.get("duration")
+    plan.price = request.POST.get("price")
     plan.save()
 
-    return JsonResponse(
-        {"message": "Plan updated successfully"},
-        status=200
-    )
+    return JsonResponse({
+        "message": "Plan updated successfully"
+    })
 
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_plan(request, plan_id):
+    tenant = get_tenant(request)
 
-    # STAFF is NOT allowed to delete
-    if request.user.role == "STAFF":
+    if tenant is None:
         return JsonResponse(
-            {"error": "Staff cannot delete plans"},
+            {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # Only SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN
-    # can delete
-    if not (
-        request.user.is_superuser
-        or request.user.role in [
-            "SUPER_ADMIN",
-            "TENANT_ADMIN",
-            "BRANCH_ADMIN"
-        ]
-    ):
+    # Only Tenant Admin can delete plans
+    if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
-            {"error": "You do not have permission to delete plans"},
+            {"error": "Only Tenant Admin can delete plans"},
             status=403
         )
 
     try:
-
-        # SUPER_ADMIN → can delete ANY plan
-        if (
-            request.user.is_superuser
-            or request.user.role == "SUPER_ADMIN"
-        ):
-            plan = Plan.objects.get(id=plan_id)
-
-        else:
-            # Tenant/Branch admin → only their tenant's plans
-            if not request.user.tenant_id:
-                return JsonResponse(
-                    {"error": "User is not assigned to a tenant"},
-                    status=403
-                )
-
-            plan = Plan.objects.get(
-                id=plan_id,
-                tenant=request.user.tenant
-            )
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
 
     except Plan.DoesNotExist:
         return JsonResponse(
@@ -1702,55 +1686,26 @@ def delete_plan(request, plan_id):
 
     plan.delete()
 
-    return JsonResponse(
-        {"message": "Plan deleted successfully"},
-        status=200
-    )
+    return JsonResponse({
+        "message": "Plan deleted successfully"
+    })
 
-
-from django.http import JsonResponse
-from django.db.models import Q
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-
-
-# =========================================================
-# CREATE BRANCH
-# SUPER_ADMIN       -> Yes
-# TENANT_ADMIN      -> Yes
-# BRANCH_ADMIN      -> Yes
-# STAFF             -> No
-# =========================================================
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_branch(request):
-
     tenant = get_tenant(request)
-    user = request.user
 
-    # SUPER_ADMIN must select a tenant
-    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before creating a branch"},
-            status=400
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # BRANCH_ADMIN is also allowed to create branches
-    if user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN",
-        "BRANCH_ADMIN"
-    ] and not user.is_superuser:
+    # Only Tenant Admin can create branches
+    if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
-            {"error": "You are not permitted to create branches"},
+            {"error": "Only Tenant Admin can create branches"},
             status=403
         )
 
@@ -1773,34 +1728,17 @@ def create_branch(request):
     )
 
     return JsonResponse(
-        {"message": "success"},
+        {"message": "Branch created successfully"},
         status=201
     )
 
 
-# =========================================================
-# GET BRANCHES
-# SUPER_ADMIN       -> All branches in selected tenant
-# TENANT_ADMIN      -> All branches in their tenant
-# BRANCH_ADMIN      -> Own branch only
-# STAFF             -> Own branch only
-# =========================================================
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branches(request):
-
     tenant = get_tenant(request)
     user = request.user
 
-    # SUPER_ADMIN must select a tenant
-    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing branches"},
-            status=400
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -1809,9 +1747,8 @@ def get_branches(request):
 
     qs = Branch.objects.filter(tenant=tenant)
 
-    # BRANCH_ADMIN and STAFF -> own branch only
+    # Branch Admin and Staff can only view their own branch
     if user.role in ["BRANCH_ADMIN", "STAFF"]:
-
         if not user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -1830,39 +1767,18 @@ def get_branches(request):
     )
 
 
-# =========================================================
-# GET BRANCH MEMBERS
-# SUPER_ADMIN       -> Any branch in selected tenant
-# TENANT_ADMIN      -> Any branch in their tenant
-# BRANCH_ADMIN      -> Own branch only
-# STAFF             -> Own branch only
-# =========================================================
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branch_members(request, branch_id):
-
     tenant = get_tenant(request)
-    user = request.user
 
-    # SUPER_ADMIN must select a tenant
-    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
-        return JsonResponse(
-            {
-                "error":
-                "Please select a tenant before viewing branch members"
-            },
-            status=400
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # Get branch only from selected tenant
+    # Get branch only from the user's tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
@@ -1874,23 +1790,21 @@ def get_branch_members(request, branch_id):
             status=404
         )
 
-    # BRANCH_ADMIN and STAFF -> own branch only
-    if user.role in ["BRANCH_ADMIN", "STAFF"]:
-
-        if not user.branch_id:
+    # Branch Admin and Staff can access only their own branch
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if not request.user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
                 status=403
             )
 
-        if user.branch_id != branch.id:
+        if request.user.branch_id != branch.id:
             return JsonResponse(
                 {"error": "You are not permitted to access this branch"},
                 status=403
             )
 
     try:
-
         members = (
             Member.objects
             .filter(
@@ -1906,7 +1820,6 @@ def get_branch_members(request, branch_id):
                 "name": m.name,
                 "phone": m.phone,
                 "email": m.email,
-
                 "plan": {
                     "id": m.plan.id,
                     "name": m.plan.name,
@@ -1927,69 +1840,48 @@ def get_branch_members(request, branch_id):
         })
 
     except Exception as e:
-
         return JsonResponse(
             {"error": str(e)},
             status=500
         )
 
 
-# =========================================================
-# UPDATE BRANCH
-# SUPER_ADMIN       -> Any branch
-# TENANT_ADMIN      -> Any branch in tenant
-# BRANCH_ADMIN      -> Own branch only
-# STAFF             -> No
-# =========================================================
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_branch(request, branch_id):
-
     tenant = get_tenant(request)
     user = request.user
 
-    # SUPER_ADMIN must select a tenant
-    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before updating a branch"},
-            status=400
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # STAFF cannot update
+    # Only Tenant Admin and Branch Admin can update branches
     if user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
-    ] and not user.is_superuser:
+    ]:
         return JsonResponse(
             {"error": "You are not permitted to update branches"},
             status=403
         )
 
-    # Get branch only from selected tenant
+    # Get branch only from the user's tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
             tenant=tenant
         )
     except Branch.DoesNotExist:
-
         return JsonResponse(
             {"error": "Branch not found"},
             status=404
         )
 
-    # BRANCH_ADMIN -> own branch only
+    # Branch Admin can update ONLY their own branch
     if user.role == "BRANCH_ADMIN":
-
         if not user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -2002,7 +1894,7 @@ def update_branch(request, branch_id):
                 status=403
             )
 
-    # Update existing fields
+    # Update branch fields
     branch.name = request.POST.get("name")
     branch.location = request.POST.get("location")
     branch.manager_name = request.POST.get("manager_name")
@@ -2016,53 +1908,30 @@ def update_branch(request, branch_id):
     })
 
 
-# =========================================================
-# DELETE BRANCH
-# SUPER_ADMIN       -> Yes
-# TENANT_ADMIN      -> Yes
-# BRANCH_ADMIN      -> No
-# STAFF             -> No
-# =========================================================
-
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_branch(request, branch_id):
-
     tenant = get_tenant(request)
-    user = request.user
 
-    # SUPER_ADMIN must select a tenant
-    if (user.is_superuser or user.role == "SUPER_ADMIN") and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before deleting a branch"},
-            status=400
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
             status=403
         )
 
-    # Only SUPER_ADMIN and TENANT_ADMIN can delete
-    if user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
-    ] and not user.is_superuser:
+    # Only Tenant Admin can delete branches
+    if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
-            {"error": "Not permitted"},
+            {"error": "Only Tenant Admin can delete branches"},
             status=403
         )
 
-    # Get branch only from selected tenant
     try:
         branch = Branch.objects.get(
             id=branch_id,
             tenant=tenant
         )
     except Branch.DoesNotExist:
-
         return JsonResponse(
             {"error": "Branch not found"},
             status=404
@@ -2073,6 +1942,7 @@ def delete_branch(request, branch_id):
     return JsonResponse({
         "message": "Branch deleted successfully"
     })
+
 
 
 from datetime import date, datetime, timedelta
@@ -2164,7 +2034,6 @@ def get_period_dates(period, selected_date=None):
 # =========================================================
 # DASHBOARD STATS
 # =========================================================
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_dashboard_stats(request):
@@ -2175,18 +2044,7 @@ def get_dashboard_stats(request):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-
-        return JsonResponse(
-            {
-                "error":
-                    "Please select a tenant before viewing dashboard"
-            },
-            status=400
-        )
-
-    # All other users must belong to a tenant
+    # All users must belong to a tenant
     if tenant is None:
 
         return JsonResponse(
@@ -2197,7 +2055,6 @@ def get_dashboard_stats(request):
             status=403
         )
 
-
     # =====================================================
     # BRANCH FILTER
     # =====================================================
@@ -2206,7 +2063,6 @@ def get_dashboard_stats(request):
         request,
         tenant
     )
-
 
     # =====================================================
     # PERIOD
@@ -2218,7 +2074,6 @@ def get_dashboard_stats(request):
     ).lower()
 
     date_str = request.GET.get("date")
-
 
     # =====================================================
     # SELECTED DATE
@@ -2247,7 +2102,6 @@ def get_dashboard_stats(request):
 
         today = date.today()
 
-
     # =====================================================
     # PERIOD DATES
     # =====================================================
@@ -2267,7 +2121,6 @@ def get_dashboard_stats(request):
             status=400
         )
 
-
     # =====================================================
     # PREVIOUS MONTH
     # =====================================================
@@ -2282,7 +2135,6 @@ def get_dashboard_stats(request):
         last_month = today.month - 1
         last_year = today.year
 
-
     # =====================================================
     # MEMBERS
     # Tenant + Branch scoped
@@ -2295,7 +2147,6 @@ def get_dashboard_stats(request):
         "plan",
         "branch"
     )
-
 
     # =====================================================
     # MEMBER COUNTS
@@ -2323,7 +2174,6 @@ def get_dashboard_stats(request):
         due_amount__gt=0
     ).count()
 
-
     # =====================================================
     # UPCOMING EXPIRIES
     # =====================================================
@@ -2339,7 +2189,6 @@ def get_dashboard_stats(request):
         )
         .order_by("expiry_date")
     )
-
 
     upcoming_expiries_list = [
 
@@ -2363,7 +2212,6 @@ def get_dashboard_stats(request):
         for member in expiries
     ]
 
-
     # =====================================================
     # RECENT REGISTRATIONS
     # =====================================================
@@ -2373,7 +2221,6 @@ def get_dashboard_stats(request):
         .select_related("plan", "branch")
         .order_by("-id")[:5]
     )
-
 
     recent_registrations = [
 
@@ -2414,9 +2261,17 @@ def get_dashboard_stats(request):
         for member in recent
     ]
 
-
     # =====================================================
     # FINANCIAL DATA
+    #
+    # INCOME:
+    #   - Member / Membership fees
+    #   - Product sales
+    #
+    # EXPENSE:
+    #   - Salary
+    #   - Other expenses
+    #
     # Tenant scoped
     # =====================================================
 
@@ -2432,15 +2287,18 @@ def get_dashboard_stats(request):
         tenant=tenant
     )
 
-
     # =====================================================
     # BRANCH FINANCIAL FILTER
     # Branch Admin + Staff → Own Branch Only
     # =====================================================
 
-    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
 
         if not request.user.branch_id:
+
             return JsonResponse(
                 {
                     "error":
@@ -2465,6 +2323,7 @@ def get_dashboard_stats(request):
     # TOTAL / ALL-TIME INCOME
     # =====================================================
 
+    # Member / Membership fees
     total_membership_income = (
         income_qs
         .aggregate(
@@ -2473,7 +2332,7 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
+    # Product sales
     total_product_income = (
         sales_qs
         .aggregate(
@@ -2482,12 +2341,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     total_income = (
         total_membership_income
         + total_product_income
     )
-
 
     # =====================================================
     # PERIOD INCOME
@@ -2505,7 +2362,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     period_product_income = (
         sales_qs
         .filter(
@@ -2518,12 +2374,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     period_income = (
         period_membership_income
         + period_product_income
     )
-
 
     # =====================================================
     # TODAY INCOME
@@ -2540,7 +2394,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     today_product_income = (
         sales_qs
         .filter(
@@ -2552,12 +2405,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     today_income = (
         today_membership_income
         + today_product_income
     )
-
 
     # =====================================================
     # MONTHLY INCOME
@@ -2575,7 +2426,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     monthly_product_income = (
         sales_qs
         .filter(
@@ -2588,12 +2438,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     monthly_income = (
         monthly_membership_income
         + monthly_product_income
     )
-
 
     # =====================================================
     # YEARLY INCOME
@@ -2610,7 +2458,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     yearly_product_income = (
         sales_qs
         .filter(
@@ -2622,12 +2469,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     yearly_income = (
         yearly_membership_income
         + yearly_product_income
     )
-
 
     # =====================================================
     # LAST MONTH INCOME
@@ -2645,7 +2490,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     last_month_product_income = (
         sales_qs
         .filter(
@@ -2658,12 +2502,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     last_month_income = (
         last_month_membership_income
         + last_month_product_income
     )
-
 
     # =====================================================
     # SALES
@@ -2677,7 +2519,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     period_sales = (
         sales_qs
         .filter(
@@ -2690,7 +2531,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     today_sales = (
         sales_qs
         .filter(
@@ -2701,7 +2541,6 @@ def get_dashboard_stats(request):
         )["total"]
         or Decimal("0")
     )
-
 
     monthly_sales = (
         sales_qs
@@ -2715,7 +2554,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     last_month_sales = (
         sales_qs
         .filter(
@@ -2728,7 +2566,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     yearly_sales = (
         sales_qs
         .filter(
@@ -2740,9 +2577,10 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     # =====================================================
     # EXPENSE
+    #
+    # Salary + Other Expenses
     # =====================================================
 
     total_expense = (
@@ -2752,7 +2590,6 @@ def get_dashboard_stats(request):
         )["total"]
         or Decimal("0")
     )
-
 
     period_expense = (
         expense_qs
@@ -2766,7 +2603,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     today_expense = (
         expense_qs
         .filter(
@@ -2777,7 +2613,6 @@ def get_dashboard_stats(request):
         )["total"]
         or Decimal("0")
     )
-
 
     monthly_expense = (
         expense_qs
@@ -2791,7 +2626,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     last_month_expense = (
         expense_qs
         .filter(
@@ -2804,7 +2638,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     yearly_expense = (
         expense_qs
         .filter(
@@ -2815,7 +2648,6 @@ def get_dashboard_stats(request):
         )["total"]
         or Decimal("0")
     )
-
 
     # =====================================================
     # PROFIT / LOSS
@@ -2831,7 +2663,6 @@ def get_dashboard_stats(request):
         Decimal("0")
     )
 
-
     today_profit = max(
         today_income - today_expense,
         Decimal("0")
@@ -2841,7 +2672,6 @@ def get_dashboard_stats(request):
         today_expense - today_income,
         Decimal("0")
     )
-
 
     monthly_profit = max(
         monthly_income - monthly_expense,
@@ -2853,7 +2683,6 @@ def get_dashboard_stats(request):
         Decimal("0")
     )
 
-
     total_profit = max(
         total_income - total_expense,
         Decimal("0")
@@ -2863,7 +2692,6 @@ def get_dashboard_stats(request):
         total_expense - total_income,
         Decimal("0")
     )
-
 
     yearly_profit = max(
         yearly_income - yearly_expense,
@@ -2875,9 +2703,11 @@ def get_dashboard_stats(request):
         Decimal("0")
     )
 
-
     # =====================================================
     # CATEGORY INCOME
+    #
+    # Member fees -> Income
+    # Product sales -> Income
     # =====================================================
 
     membership_income = (
@@ -2891,7 +2721,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     product_income = (
         sales_qs
         .aggregate(
@@ -2899,7 +2728,6 @@ def get_dashboard_stats(request):
         )["total"]
         or Decimal("0")
     )
-
 
     admission_income = (
         income_qs
@@ -2912,7 +2740,6 @@ def get_dashboard_stats(request):
         or Decimal("0")
     )
 
-
     # =====================================================
     # GROWTH
     # =====================================================
@@ -2922,30 +2749,25 @@ def get_dashboard_stats(request):
         last_month_income
     )
 
-
     expense_growth = calculate_growth(
         monthly_expense,
         last_month_expense
     )
-
 
     previous_month_profit = (
         last_month_income
         - last_month_expense
     )
 
-
     profit_growth = calculate_growth(
         monthly_profit,
         previous_month_profit
     )
 
-
     sales_growth = calculate_growth(
         monthly_sales,
         last_month_sales
     )
-
 
     # =====================================================
     # RESPONSE
@@ -2963,7 +2785,6 @@ def get_dashboard_stats(request):
 
         "end_date": end_date,
 
-
         # -----------------------------------------------
         # MEMBERS
         # -----------------------------------------------
@@ -2980,71 +2801,108 @@ def get_dashboard_stats(request):
 
         "pending_payments": pending_payments,
 
-
         # -----------------------------------------------
         # SELECTED PERIOD
         # -----------------------------------------------
 
         "total_income": period_income,
+
         "total_sales": period_sales,
+
         "total_expense": period_expense,
+
         "total_profit": period_profit,
+
         "period_loss": period_loss,
+
         # -----------------------------------------------
         # TODAY
         # -----------------------------------------------
+
         "today_income": today_income,
+
         "today_sales": today_sales,
+
         "today_expense": today_expense,
+
         "today_profit": today_profit,
+
         "today_loss": today_loss,
+
         # -----------------------------------------------
         # MONTHLY
         # -----------------------------------------------
+
         "monthly_income": monthly_income,
+
         "monthly_sales": monthly_sales,
+
         "monthly_expense": monthly_expense,
+
         "monthly_profit": monthly_profit,
+
         "monthly_loss": monthly_loss,
+
         # -----------------------------------------------
         # YEARLY
         # -----------------------------------------------
+
         "yearly_income": yearly_income,
+
         "yearly_sales": yearly_sales,
+
         "yearly_expense": yearly_expense,
+
         "yearly_profit": yearly_profit,
+
         "yearly_loss": yearly_loss,
+
         # -----------------------------------------------
         # ALL TIME
         # -----------------------------------------------
+
         "all_time_income": total_income,
+
         "all_time_sales": total_sales,
+
         "all_time_expense": total_expense,
+
         "all_time_profit": total_profit,
+
         "total_loss": total_loss,
+
         # -----------------------------------------------
         # CATEGORY INCOME
         # -----------------------------------------------
+
         "membership_income": membership_income,
+
         "product_income": product_income,
+
         "admission_income": admission_income,
+
         # -----------------------------------------------
         # GROWTH
         # -----------------------------------------------
+
         "sales_growth": sales_growth,
+
         "revenue_growth": revenue_growth,
+
         "expense_growth": expense_growth,
+
         "profit_growth": profit_growth,
+
         # -----------------------------------------------
         # UPCOMING EXPIRIES
         # -----------------------------------------------
+
         "upcoming_expiries": len(
             upcoming_expiries_list
         ),
 
         "upcoming_expiries_list":
             upcoming_expiries_list,
-
 
         # -----------------------------------------------
         # RECENT REGISTRATIONS
@@ -3060,12 +2918,6 @@ def get_dashboard_stats(request):
 @permission_classes([IsAuthenticated])
 def get_payments(request):
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing payments"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -3188,21 +3040,13 @@ def get_payments(request):
 
     return JsonResponse(data, safe=False)
 
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def renew_member(request, member_id):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before renewing a member"},
-            status=400
-        )
-
-    # Other users must belong to tenant
+    # All users must belong to a tenant
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -3289,30 +3133,13 @@ def renew_member(request, member_id):
         "status": member.status,
     })
 
-
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_blocked_members(request):
 
     tenant = get_tenant(request)
 
-    # -------------------------------------------------
-    # SUPER_ADMIN must select tenant
-    # -------------------------------------------------
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-
-        return JsonResponse(
-            {
-                "error":
-                    "Please select a tenant"
-            },
-            status=400
-        )
-
     if tenant is None:
-
         return JsonResponse(
             {
                 "error":
@@ -3391,25 +3218,18 @@ def get_blocked_members(request):
         data,
         safe=False
     )
-
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def send_whatsapp(request, member_id):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before sending WhatsApp message"},
-            status=400
-        )
-
-    # Other users must belong to tenant
     if tenant is None:
         return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
+            {
+                "error":
+                    "User is not assigned to a tenant"
+            },
             status=403
         )
 
@@ -3421,7 +3241,10 @@ def send_whatsapp(request, member_id):
         )
     except Member.DoesNotExist:
         return JsonResponse(
-            {"error": "Member not found or access denied"},
+            {
+                "error":
+                    "Member not found or access denied"
+            },
             status=404
         )
 
@@ -3437,25 +3260,18 @@ def send_whatsapp(request, member_id):
         ),
     })
 
-
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def expiring_soon_members(request):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing expiring members"},
-            status=400
-        )
-
-    # Other users must belong to tenant
     if tenant is None:
         return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
+            {
+                "error":
+                    "User is not assigned to a tenant"
+            },
             status=403
         )
 
@@ -3525,25 +3341,18 @@ def expiring_soon_members(request):
         safe=False
     )
 
-
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def expired_members(request):
 
     tenant = get_tenant(request)
 
-    # SUPER_ADMIN must select tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing expired members"},
-            status=400
-        )
-
-    # Other users must belong to tenant
     if tenant is None:
         return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
+            {
+                "error":
+                    "User is not assigned to a tenant"
+            },
             status=403
         )
 
@@ -3616,7 +3425,6 @@ def expired_members(request):
     )
 
 
-
 import json
 from datetime import date, datetime, timedelta
 
@@ -3639,12 +3447,6 @@ def create_product(request):
 
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before creating a product"},
-            status=400
-        )
-
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -3652,7 +3454,6 @@ def create_product(request):
         )
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -3663,6 +3464,7 @@ def create_product(request):
 
     # Branch Admin can only create products for their own branch
     if request.user.role == "BRANCH_ADMIN":
+
         branch = request.user.branch
 
         if branch is None:
@@ -3678,8 +3480,8 @@ def create_product(request):
             )
 
     else:
-        # SUPER_ADMIN / TENANT_ADMIN
-        # branch can come from request
+        # TENANT_ADMIN
+        # Branch comes from request
         branch_id = request.POST.get("branch")
 
         if not branch_id:
@@ -3718,17 +3520,12 @@ def create_product(request):
         status=201
     )
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_products(request):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing products"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -3741,6 +3538,7 @@ def get_products(request):
     )
 
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
         if request.user.branch is None:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -3770,17 +3568,12 @@ def get_products(request):
 
     return JsonResponse(data, safe=False)
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_product(request, product_id):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before updating a product"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -3789,7 +3582,6 @@ def update_product(request, product_id):
         )
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -3815,7 +3607,10 @@ def update_product(request, product_id):
 
             if product.branch != request.user.branch:
                 return JsonResponse(
-                    {"error": "You can only update products in your branch"},
+                    {
+                        "error":
+                        "You can only update products in your branch"
+                    },
                     status=403
                 )
 
@@ -3860,17 +3655,12 @@ def update_product(request, product_id):
         status=200
     )
 
+
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_product(request, product_id):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before deleting a product"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -3879,7 +3669,6 @@ def delete_product(request, product_id):
         )
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -3905,7 +3694,10 @@ def delete_product(request, product_id):
 
             if product.branch != request.user.branch:
                 return JsonResponse(
-                    {"error": "You can only delete products in your branch"},
+                    {
+                        "error":
+                        "You can only delete products in your branch"
+                    },
                     status=403
                 )
 
@@ -3927,12 +3719,6 @@ def delete_product(request, product_id):
 def sales_list(request):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing sales"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -4052,35 +3838,103 @@ def sales_list(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def one_sale(request, sale_id):
+
     tenant = get_tenant(request)
-    sale = get_object_or_404(Sales_product, id=sale_id, tenant=tenant)
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403
+        )
+
+    try:
+        sale = (
+            Sales_product.objects
+            .select_related(
+                "product",
+                "member",
+                "member__branch"
+            )
+            .get(
+                id=sale_id,
+                tenant=tenant
+            )
+        )
+
+    except Sales_product.DoesNotExist:
+        return JsonResponse(
+            {"error": "Sale not found"},
+            status=404
+        )
+
+    # -----------------------------------------
+    # Branch restriction
+    # -----------------------------------------
+
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if not request.user.branch_id:
+            return JsonResponse(
+                {"error": "User is not assigned to a branch"},
+                status=403
+            )
+
+        if not sale.member or sale.member.branch_id != request.user.branch_id:
+            return JsonResponse(
+                {"error": "You can only view sales from your branch"},
+                status=403
+            )
 
     return JsonResponse({
         "id": sale.id,
-        "member_id": sale.member_id,
-        "member_name": sale.member.name,
-        "product": getattr(sale.product, "name", str(sale.product)),
-        "quantity": sale.quantity,
-        "unit_price": float(sale.unit_price),
-        "total_amount": float(sale.total_amount),
-        "payment_method": sale.payment_method,
-        "sold_at": sale.sold_at,
-        "invoice_no": getattr(sale, "invoice_no", f"INV-{sale.id}"),
-    })
 
+        "member_id": sale.member_id,
+
+        "member_name": (
+            sale.member.name
+            if sale.member
+            else None
+        ),
+
+        "product": (
+            getattr(
+                sale.product,
+                "name",
+                str(sale.product)
+            )
+        ),
+
+        "quantity": sale.quantity,
+
+        "unit_price": float(
+            sale.unit_price
+        ),
+
+        "total_amount": float(
+            sale.total_amount
+        ),
+
+        "payment_method": sale.payment_method,
+
+        "sold_at": sale.sold_at,
+
+        "invoice_no": getattr(
+            sale,
+            "invoice_no",
+            f"INV-{sale.id}"
+        ),
+    })
 
 
 # ============================================================
 # STAFF
 # ============================================================
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_staff(request):
 
-    # SUPER_ADMIN, TENANT_ADMIN and BRANCH_ADMIN can create staff
+    # TENANT_ADMIN and BRANCH_ADMIN can create staff
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -4090,12 +3944,6 @@ def create_staff(request):
         )
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before creating staff"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -4125,7 +3973,7 @@ def create_staff(request):
             )
 
     else:
-        # SUPER_ADMIN / TENANT_ADMIN
+        # TENANT_ADMIN
         branch_id = request.POST.get("branch")
 
         if not branch_id:
@@ -4187,12 +4035,6 @@ def create_staff(request):
 def get_staffs(request):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing staff"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -4265,18 +4107,11 @@ def get_staffs(request):
     )
 
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_staff(request, staff_id):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before viewing staff"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -4349,17 +4184,12 @@ def get_staff(request, staff_id):
         ),
     })
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_staff(request, id):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before updating staff"},
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -4368,7 +4198,6 @@ def update_staff(request, id):
         )
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -4407,7 +4236,7 @@ def update_staff(request, id):
         branch = staff.branch
 
     else:
-        # SUPER_ADMIN / TENANT_ADMIN can change branch
+        # TENANT_ADMIN can change branch
         branch_id = request.POST.get(
             "branch",
             staff.branch_id
@@ -4466,12 +4295,6 @@ def delete_staff(request, staff_id):
 
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {"error": "Please select a tenant before deleting staff"},
-            status=400
-        )
-
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
@@ -4479,7 +4302,6 @@ def delete_staff(request, staff_id):
         )
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -4528,17 +4350,10 @@ def delete_staff(request, staff_id):
 # ============================================================
 # PAUSE / RESUME
 # ============================================================
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def pause_member(request, member_id):
     tenant = get_tenant(request)
-
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before pausing a member"
-        }, status=400)
 
     if tenant is None:
         return JsonResponse({
@@ -4687,15 +4502,11 @@ def pause_member(request, member_id):
         "is_paused": member.is_paused,
     })
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def resume_member(request, member_id):
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before resuming a member"
-        }, status=400)
 
     if tenant is None:
         return JsonResponse({
@@ -4855,11 +4666,6 @@ def resume_member(request, member_id):
 def add_member_payment(request, member_id):
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before recording payment"
-        }, status=400)
-
     if tenant is None:
         return JsonResponse({
             "error": "User is not assigned to a tenant"
@@ -4958,148 +4764,13 @@ def add_member_payment(request, member_id):
         ),
     }, status=201)
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def add_staff_payment(request, staff_id):
-    tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before recording staff payment"
-        }, status=400)
-
-    if tenant is None:
-        return JsonResponse({
-            "error": "User is not assigned to a tenant"
-        }, status=403)
-
-    # Only admins can pay staff
-    if request.user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
-    ]:
-        return JsonResponse({
-            "error": "Only Super Admin and Tenant Admin can record staff payments"
-        }, status=403)
-
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({
-            "error": "Invalid JSON data"
-        }, status=400)
-
-    # Get staff belonging to selected tenant
-    try:
-        staff = (
-            Staffs.objects
-            .select_related("branch")
-            .get(
-                id=staff_id,
-                tenant=tenant
-            )
-        )
-    except Staffs.DoesNotExist:
-        return JsonResponse({
-            "error": "Staff not found or access denied"
-        }, status=404)
-
-    # Amount
-    try:
-        amount = float(data.get("amount", 0))
-    except (ValueError, TypeError):
-        return JsonResponse({
-            "error": "Invalid payment amount"
-        }, status=400)
-
-    if amount <= 0:
-        return JsonResponse({
-            "error": "Amount must be greater than 0"
-        }, status=400)
-
-    payment_date = data.get("payment_date")
-
-    if not payment_date:
-        return JsonResponse({
-            "error": "Payment date is required"
-        }, status=400)
-
-    payment_method = data.get("payment_method")
-
-    if not payment_method:
-        return JsonResponse({
-            "error": "Payment method is required"
-        }, status=400)
-
-    payment_type = data.get(
-        "payment_type",
-        "Salary"
-    )
-
-    description = data.get(
-        "description",
-        ""
-    )
-
-    # Create payment record
-    payment = Payment.objects.create(
-        tenant=tenant,
-        staff=staff,
-        amount=amount,
-        payment_type=payment_type,
-        payment_method=payment_method,
-        payment_date=payment_date,
-    )
-
-    # Create expense record
-    expense = Expense.objects.create(
-        tenant=tenant,
-        title=payment_type,
-        name=staff.name,
-        phone=staff.phone,
-        category="salary",
-        amount=amount,
-        payment_method=payment_method,
-        date=payment_date,
-        description=(
-            description
-            or f"{payment_type} paid to {staff.name}"
-        ),
-        is_system_generated=True,
-    )
-
-    return JsonResponse({
-        "message": "Staff payment recorded successfully",
-
-        "payment_id": payment.id,
-        "expense_id": expense.id,
-
-        "staff_id": staff.id,
-        "staff_name": staff.name,
-
-        "amount": str(payment.amount),
-        "payment_type": payment_type,
-
-        "branch": {
-            "id": staff.branch.id,
-            "name": staff.branch.name
-        } if staff.branch else None,
-    }, status=201)
-    
-
 # ============================================================
 # ENQUIRY
 # ============================================================
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_enquiry(request):
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before adding an enquiry"
-        }, status=400)
 
     if tenant is None:
         return JsonResponse({
@@ -5144,11 +4815,6 @@ def add_enquiry(request):
 def view_enquiry(request):
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before viewing enquiries"
-        }, status=400)
-
     if tenant is None:
         return JsonResponse({
             "error": "User is not assigned to a tenant"
@@ -5173,15 +4839,11 @@ def view_enquiry(request):
 
     return JsonResponse(data, safe=False)
 
+
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_enquiry(request, enquiry_id):
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before deleting an enquiry"
-        }, status=400)
 
     if tenant is None:
         return JsonResponse({
@@ -5189,7 +4851,6 @@ def delete_enquiry(request, enquiry_id):
         }, status=403)
 
     if request.user.role not in [
-        "SUPER_ADMIN",
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
     ]:
@@ -5213,96 +4874,11 @@ def delete_enquiry(request, enquiry_id):
 # ============================================================
 # EXPENSES / INCOME (manual entries + reports)
 # ============================================================
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def add_expense(request):
-
-    tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before adding an expense"
-        }, status=400)
-
-    if tenant is None:
-        return JsonResponse({
-            "error": "User is not assigned to a tenant"
-        }, status=403)
-
-    if request.user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
-    ]:
-        return JsonResponse({
-            "error": "Only Super Admin and Tenant Admin can add expenses"
-        }, status=403)
-
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({
-            "error": "Invalid JSON data"
-        }, status=400)
-
-    try:
-        amount = float(data.get("amount", 0))
-    except (ValueError, TypeError):
-        return JsonResponse({
-            "error": "Invalid expense amount"
-        }, status=400)
-
-    if amount <= 0:
-        return JsonResponse({
-            "error": "Amount must be greater than 0"
-        }, status=400)
-
-    branch_id = data.get("branch_id")
-
-    if not branch_id:
-        return JsonResponse({
-            "error": "Branch is required"
-        }, status=400)
-
-    try:
-        branch = Branch.objects.get(
-            id=branch_id,
-            tenant=tenant
-        )
-    except Branch.DoesNotExist:
-        return JsonResponse({
-            "error": "Invalid branch"
-        }, status=404)
-
-    expense = Expense.objects.create(
-        tenant=tenant,
-        branch=branch,
-        title=data.get("title"),
-        name=data.get("name"),
-        phone=data.get("phone"),
-        category=data.get("category"),
-        description=data.get("description"),
-        amount=amount,
-        payment_method=data.get("payment_method"),
-        date=data.get("date"),
-        is_system_generated=False,
-    )
-
-    return JsonResponse({
-        "message": "Expense added successfully",
-        "id": expense.id
-    }, status=201)
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def view_expenses(request):
+def expenses(request):
 
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before viewing expenses"
-        }, status=400)
 
     if tenant is None:
         return JsonResponse({
@@ -5345,6 +4921,7 @@ def view_expenses(request):
             "amount": str(e.amount),
             "payment_method": e.payment_method,
             "date": e.date.strftime("%Y-%m-%d"),
+
             "branch": (
                 {
                     "id": e.branch.id,
@@ -5354,6 +4931,7 @@ def view_expenses(request):
                 if e.branch
                 else None
             ),
+
             "type": (
                 "Salary"
                 if e.is_system_generated
@@ -5368,25 +4946,330 @@ def view_expenses(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def add_income(request):
-    tenant = get_tenant(request)
+def add_expense(request):
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before adding income"
-        }, status=400)
+    tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse({
             "error": "User is not assigned to a tenant"
         }, status=403)
 
+    # Tenant Admin, Branch Admin and Staff can add expenses
     if request.user.role not in [
-        "SUPER_ADMIN",
-        "TENANT_ADMIN"
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN",
+        "STAFF"
     ]:
         return JsonResponse({
-            "error": "Only Super Admin and Tenant Admin can add income"
+            "error": "You do not have permission to add expenses"
+        }, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
+
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid expense amount"
+        }, status=400)
+
+    if amount <= 0:
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
+
+    # ----------------------------------
+    # BRANCH
+    # ----------------------------------
+
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+
+        if not request.user.branch_id:
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
+
+        branch = request.user.branch
+
+    else:
+        branch_id = data.get("branch_id")
+
+        if not branch_id:
+            return JsonResponse({
+                "error": "Branch is required"
+            }, status=400)
+
+        try:
+            branch = Branch.objects.get(
+                id=branch_id,
+                tenant=tenant
+            )
+        except Branch.DoesNotExist:
+            return JsonResponse({
+                "error": "Invalid branch"
+            }, status=404)
+
+    expense = Expense.objects.create(
+        tenant=tenant,
+        branch=branch,
+        title=data.get("title"),
+        name=data.get("name"),
+        phone=data.get("phone"),
+        category=data.get("category"),
+        description=data.get("description"),
+        amount=amount,
+        payment_method=data.get("payment_method"),
+        date=data.get("date"),
+        is_system_generated=False,
+    )
+
+    return JsonResponse({
+        "message": "Expense added successfully",
+        "id": expense.id
+    }, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_staff_payment(request, staff_id):
+
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
+
+    # Tenant Admin and Branch Admin can pay staff
+    if request.user.role not in [
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN"
+    ]:
+        return JsonResponse({
+            "error": "Only Tenant Admin and Branch Admin can record staff payments"
+        }, status=403)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({
+            "error": "Invalid JSON data"
+        }, status=400)
+
+    # ----------------------------------
+    # GET STAFF
+    # ----------------------------------
+
+    try:
+        staff = (
+            Staffs.objects
+            .select_related("branch")
+            .get(
+                id=staff_id,
+                tenant=tenant,
+                **get_branch_filter(request, tenant)
+            )
+        )
+    except Staffs.DoesNotExist:
+        return JsonResponse({
+            "error": "Staff not found or access denied"
+        }, status=404)
+
+    # ----------------------------------
+    # AMOUNT
+    # ----------------------------------
+
+    try:
+        amount = float(data.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "error": "Invalid payment amount"
+        }, status=400)
+
+    if amount <= 0:
+        return JsonResponse({
+            "error": "Amount must be greater than 0"
+        }, status=400)
+
+    # ----------------------------------
+    # PAYMENT DATE
+    # ----------------------------------
+
+    payment_date = data.get("payment_date")
+
+    if not payment_date:
+        return JsonResponse({
+            "error": "Payment date is required"
+        }, status=400)
+
+    # ----------------------------------
+    # PAYMENT METHOD
+    # ----------------------------------
+
+    payment_method = data.get("payment_method")
+
+    if not payment_method:
+        return JsonResponse({
+            "error": "Payment method is required"
+        }, status=400)
+
+    # ----------------------------------
+    # PAYMENT DETAILS
+    # ----------------------------------
+
+    payment_type = data.get(
+        "payment_type",
+        "Salary"
+    )
+
+    description = data.get(
+        "description",
+        ""
+    )
+
+    # ----------------------------------
+    # CREATE PAYMENT RECORD
+    # ----------------------------------
+
+    payment = Payment.objects.create(
+        tenant=tenant,
+        staff=staff,
+        amount=amount,
+        payment_type=payment_type,
+        payment_method=payment_method,
+        payment_date=payment_date,
+    )
+
+    # ----------------------------------
+    # CREATE EXPENSE RECORD
+    # ----------------------------------
+
+    expense = Expense.objects.create(
+        tenant=tenant,
+
+        # Important:
+        # Save the staff's branch so branch-level
+        # expense filtering works correctly.
+        branch=staff.branch,
+
+        title=payment_type,
+        name=staff.name,
+        phone=staff.phone,
+        category="salary",
+        amount=amount,
+        payment_method=payment_method,
+        date=payment_date,
+        description=(
+            description
+            or f"{payment_type} paid to {staff.name}"
+        ),
+        is_system_generated=True,
+    )
+
+    return JsonResponse({
+        "message": "Staff payment recorded successfully",
+
+        "payment_id": payment.id,
+        "expense_id": expense.id,
+
+        "staff_id": staff.id,
+        "staff_name": staff.name,
+
+        "amount": str(payment.amount),
+        "payment_type": payment_type,
+
+        "branch": {
+            "id": staff.branch.id,
+            "name": staff.branch.name
+        } if staff.branch else None,
+    }, status=201)
+
+
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def view_expenses(request):
+
+#     tenant = get_tenant(request)
+
+#     if tenant is None:
+#         return JsonResponse({
+#             "error": "User is not assigned to a tenant"
+#         }, status=403)
+
+#     qs = (
+#         Expense.objects
+#         .filter(tenant=tenant)
+#         .select_related("branch")
+#         .order_by("-date", "-id")
+#     )
+
+#     # ----------------------------------
+#     # BRANCH ADMIN / STAFF
+#     # ----------------------------------
+
+#     if request.user.role in [
+#         "BRANCH_ADMIN",
+#         "STAFF"
+#     ]:
+
+#         if not request.user.branch_id:
+#             return JsonResponse({
+#                 "error": "User is not assigned to a branch"
+#             }, status=403)
+
+#         qs = qs.filter(
+#             branch_id=request.user.branch_id
+#         )
+
+#     data = [
+#         {
+#             "id": e.id,
+#             "title": e.title,
+#             "name": e.name,
+#             "phone": e.phone,
+#             "category": e.category,
+#             "description": e.description,
+#             "amount": str(e.amount),
+#             "payment_method": e.payment_method,
+#             "date": e.date.strftime("%Y-%m-%d"),
+#             "branch": (
+#                 {
+#                     "id": e.branch.id,
+#                     "name": e.branch.name,
+#                     "location": e.branch.location,
+#                 }
+#                 if e.branch
+#                 else None
+#             ),
+#             "type": (
+#                 "Salary"
+#                 if e.is_system_generated
+#                 else "Additional"
+#             ),
+#         }
+#         for e in qs
+#     ]
+
+#     return JsonResponse(data, safe=False)
+
+    
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def add_income(request):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
         }, status=403)
 
     try:
@@ -5422,8 +5305,32 @@ def add_income(request):
             "error": "Amount must be greater than 0"
         }, status=400)
 
+    # Determine branch
+    branch = None
+
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if not request.user.branch_id:
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
+
+        branch = request.user.branch
+
+    elif data.get("branch_id"):
+        try:
+            branch = Branch.objects.get(
+                id=data.get("branch_id"),
+                tenant=tenant
+            )
+        except Branch.DoesNotExist:
+            return JsonResponse({
+                "error": "Branch not found or access denied"
+            }, status=404)
+
+    # Create additional income
     income = Income.objects.create(
         tenant=tenant,
+        branch=branch,
         member=member,
         title=data.get("title"),
         name=data.get("name"),
@@ -5447,11 +5354,6 @@ def add_income(request):
 def incomes(request):
     tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before viewing income"
-        }, status=400)
-
     if tenant is None:
         return JsonResponse({
             "error": "User is not assigned to a tenant"
@@ -5466,22 +5368,27 @@ def incomes(request):
     income_qs = (
         Income.objects
         .filter(tenant=tenant)
-        .select_related("member", "member__branch")
+        .select_related(
+            "member",
+            "member__branch",
+            "branch"
+        )
         .order_by("-date", "-id")
     )
 
     # Branch-level filtering
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
         if not request.user.branch_id:
             return JsonResponse({
                 "error": "User is not assigned to a branch"
             }, status=403)
 
+        from django.db.models import Q
+
         income_qs = income_qs.filter(
-            member__branch_id=request.user.branch_id
+            Q(member__branch_id=request.user.branch_id)
+            |
+            Q(branch_id=request.user.branch_id)
         )
 
     for income in income_qs:
@@ -5519,10 +5426,7 @@ def incomes(request):
     )
 
     # Branch-level filtering
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
         sales_qs = sales_qs.filter(
             member__branch_id=request.user.branch_id
         )
@@ -5547,7 +5451,10 @@ def incomes(request):
             "_sort_date": sale.sold_at,
         })
 
-    # Sort everything together
+    # -------------------------
+    # SORT ALL INCOME
+    # -------------------------
+
     data.sort(
         key=lambda x: x["_sort_date"],
         reverse=True
@@ -5558,15 +5465,14 @@ def incomes(request):
 
     return JsonResponse(data, safe=False)
 
+from django.db.models import Sum
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def income_by_members(request):
-    tenant = get_tenant(request)
 
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse({
-            "error": "Please select a tenant before viewing income"
-        }, status=400)
+    tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse({
@@ -5590,6 +5496,10 @@ def income_by_members(request):
             "error": "Invalid period"
         }, status=400)
 
+    # --------------------------------------------------
+    # MEMBERSHIP + ADDITIONAL INCOME
+    # --------------------------------------------------
+
     base_income = (
         Income.objects
         .filter(
@@ -5600,7 +5510,8 @@ def income_by_members(request):
         .select_related(
             "member",
             "member__plan",
-            "member__branch"
+            "member__branch",
+            "branch"
         )
     )
 
@@ -5614,11 +5525,24 @@ def income_by_members(request):
                 "error": "User is not assigned to a branch"
             }, status=403)
 
+        # Membership income has member -> branch
+        # Additional income has branch directly
+        from django.db.models import Q
+
         base_income = base_income.filter(
-            member__branch_id=request.user.branch_id
+            Q(
+                member__branch_id=request.user.branch_id
+            )
+            |
+            Q(
+                branch_id=request.user.branch_id
+            )
         )
 
-    # Plan is now a ForeignKey
+    # --------------------------------------------------
+    # MEMBERSHIP INCOME BY PLAN
+    # --------------------------------------------------
+
     basic_income = (
         base_income
         .filter(
@@ -5647,19 +5571,60 @@ def income_by_members(request):
         )["total"] or 0
     )
 
-    other_income = (
+    # --------------------------------------------------
+    # ADDITIONAL INCOME
+    # --------------------------------------------------
+
+    additional_income = (
         base_income
         .filter(
-            category__in=[
-                "registration",
-                "product_sale",
-                "other"
-            ]
+            is_system_generated=False
+        )
+        .exclude(
+            category="membership"
         )
         .aggregate(
             total=Sum("amount")
         )["total"] or 0
     )
+
+    # --------------------------------------------------
+    # PRODUCT SALES
+    # --------------------------------------------------
+
+    sales_qs = (
+        Sales_product.objects
+        .filter(
+            tenant=tenant,
+            sold_at__date__gte=start_date,
+            sold_at__date__lte=end_date
+        )
+        .select_related(
+            "member",
+            "member__branch",
+            "product"
+        )
+    )
+
+    # Branch restriction for product sales
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+        sales_qs = sales_qs.filter(
+            member__branch_id=request.user.branch_id
+        )
+
+    product_sales = (
+        sales_qs
+        .aggregate(
+            total=Sum("total_amount")
+        )["total"] or 0
+    )
+
+    # --------------------------------------------------
+    # RESPONSE
+    # --------------------------------------------------
 
     return JsonResponse({
         "success": True,
@@ -5677,8 +5642,12 @@ def income_by_members(request):
                 "amount": float(premium_income)
             },
             {
-                "name": "Other",
-                "amount": float(other_income)
+                "name": "Product Sales",
+                "amount": float(product_sales)
+            },
+            {
+                "name": "Additional Income",
+                "amount": float(additional_income)
             },
         ],
     })
@@ -5692,15 +5661,6 @@ def expense_by_category(request):
     # -----------------------------------------
     # TENANT
     # -----------------------------------------
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "error":
-                    "Please select a tenant before viewing expenses"
-            },
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -5814,15 +5774,6 @@ def profit_loss_report(request):
     # -----------------------------------------
     # TENANT
     # -----------------------------------------
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "error":
-                    "Please select a tenant before viewing report"
-            },
-            status=400
-        )
 
     if tenant is None:
         return JsonResponse(
@@ -6439,75 +6390,8 @@ Return ONLY valid JSON using exactly this structure:
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def gym_equipment(request):
+
     tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return Response(
-            {"success": False, "error": "Please select a tenant first."},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    if tenant is None:
-        return Response(
-            {"success": False, "error": "User is not assigned to a tenant."},
-            status=status.HTTP_403_FORBIDDEN
-        )
-
-    if request.method == "GET":
-        equipment = GymEquipment.objects.filter(
-            tenant=tenant
-        ).order_by("name")
-
-        serializer = GymEquipmentSerializer(equipment, many=True)
-
-        return Response({
-            "success": True,
-            "equipment": serializer.data
-        })
-
-    # POST
-    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
-        return Response(
-            {
-                "success": False,
-                "error": "Only Super Admin and Tenant Admin can add equipment."
-            },
-            status=status.HTTP_403_FORBIDDEN
-        )
-
-    serializer = GymEquipmentSerializer(data=request.data)
-
-    if serializer.is_valid():
-        equipment = serializer.save(tenant=tenant)
-
-        return Response({
-            "success": True,
-            "message": "Equipment added successfully",
-            "equipment": GymEquipmentSerializer(equipment).data,
-        }, status=status.HTTP_201_CREATED)
-
-    return Response(
-        {
-            "success": False,
-            "errors": serializer.errors
-        },
-        status=status.HTTP_400_BAD_REQUEST
-    )
-
-
-@api_view(["PUT", "DELETE"])
-@permission_classes([IsAuthenticated])
-def gym_equipment_detail(request, equipment_id):
-    tenant = get_tenant(request)
-
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return Response(
-            {
-                "success": False,
-                "error": "Please select a tenant first."
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
 
     if tenant is None:
         return Response(
@@ -6518,21 +6402,184 @@ def gym_equipment_detail(request, equipment_id):
             status=status.HTTP_403_FORBIDDEN
         )
 
-    if request.user.role not in ["SUPER_ADMIN", "TENANT_ADMIN"]:
+    # -----------------------------------------
+    # GET - VIEW EQUIPMENT
+    # ALL ROLES
+    # -----------------------------------------
+
+    if request.method == "GET":
+
+        equipment = (
+            GymEquipment.objects
+            .filter(tenant=tenant)
+            .select_related("branch")
+            .order_by("name")
+        )
+
+        # Branch Admin / Staff can only see
+        # equipment from their own branch
+        if request.user.role in [
+            "BRANCH_ADMIN",
+            "STAFF"
+        ]:
+
+            if not request.user.branch_id:
+                return Response(
+                    {
+                        "success": False,
+                        "error": "User is not assigned to a branch."
+                    },
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            equipment = equipment.filter(
+                branch_id=request.user.branch_id
+            )
+
+        serializer = GymEquipmentSerializer(
+            equipment,
+            many=True
+        )
+
+        return Response({
+            "success": True,
+            "equipment": serializer.data
+        })
+
+    # -----------------------------------------
+    # POST - ADD EQUIPMENT
+    # ALL ROLES
+    # -----------------------------------------
+
+    if request.user.role not in [
+        "TENANT_ADMIN",
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
         return Response(
             {
                 "success": False,
-                "error": "You do not have permission to modify equipment."
+                "error": "You do not have permission to add equipment."
             },
             status=status.HTTP_403_FORBIDDEN
         )
 
-    try:
-        equipment = GymEquipment.objects.get(
-            id=equipment_id,
-            tenant=tenant
+    # -----------------------------------------
+    # BRANCH
+    # -----------------------------------------
+
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+
+        if not request.user.branch_id:
+            return Response(
+                {
+                    "success": False,
+                    "error": "User is not assigned to a branch."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        branch = request.user.branch
+
+    else:
+        # TENANT_ADMIN can select any branch
+        # belonging to their tenant
+
+        branch_id = request.data.get("branch_id")
+
+        if not branch_id:
+            return Response(
+                {
+                    "success": False,
+                    "error": "Branch is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            branch = Branch.objects.get(
+                id=branch_id,
+                tenant=tenant
+            )
+        except Branch.DoesNotExist:
+            return Response(
+                {
+                    "success": False,
+                    "error": "Invalid branch."
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    # -----------------------------------------
+    # CREATE EQUIPMENT
+    # -----------------------------------------
+
+    serializer = GymEquipmentSerializer(
+        data=request.data
+    )
+
+    if serializer.is_valid():
+
+        equipment = serializer.save(
+            tenant=tenant,
+            branch=branch
         )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Equipment added successfully",
+                "equipment": GymEquipmentSerializer(
+                    equipment
+                ).data
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+    return Response(
+        {
+            "success": False,
+            "errors": serializer.errors
+        },
+        status=status.HTTP_400_BAD_REQUEST
+    )
+
+
+@api_view(["GET", "PUT", "DELETE"])
+@permission_classes([IsAuthenticated])
+def gym_equipment_detail(request, equipment_id):
+
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant."
+            },
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # -----------------------------------------
+    # GET EQUIPMENT
+    # -----------------------------------------
+
+    try:
+
+        equipment = (
+            GymEquipment.objects
+            .select_related("branch")
+            .get(
+                id=equipment_id,
+                tenant=tenant
+            )
+        )
+
     except GymEquipment.DoesNotExist:
+
         return Response(
             {
                 "success": False,
@@ -6541,19 +6588,77 @@ def gym_equipment_detail(request, equipment_id):
             status=status.HTTP_404_NOT_FOUND
         )
 
+    # -----------------------------------------
+    # BRANCH ACCESS
+    # BRANCH_ADMIN / STAFF
+    # -----------------------------------------
+
+    if request.user.role in [
+        "BRANCH_ADMIN",
+        "STAFF"
+    ]:
+
+        if not request.user.branch_id:
+            return Response(
+                {
+                    "success": False,
+                    "error": "User is not assigned to a branch."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if equipment.branch_id != request.user.branch_id:
+            return Response(
+                {
+                    "success": False,
+                    "error": "You do not have access to this equipment."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+    # -----------------------------------------
+    # GET
+    # ALL ROLES
+    # -----------------------------------------
+
+    if request.method == "GET":
+
+        serializer = GymEquipmentSerializer(
+            equipment
+        )
+
+        return Response({
+            "success": True,
+            "equipment": serializer.data
+        })
+
+    # -----------------------------------------
+    # PUT
+    # ALL ROLES
+    # -----------------------------------------
+
     if request.method == "PUT":
+
         serializer = GymEquipmentSerializer(
             equipment,
             data=request.data
         )
 
         if serializer.is_valid():
-            equipment = serializer.save()
+
+            # Keep equipment in its existing branch.
+            # Branch cannot be changed accidentally.
+            equipment = serializer.save(
+                tenant=tenant,
+                branch=equipment.branch
+            )
 
             return Response({
                 "success": True,
                 "message": "Equipment updated successfully",
-                "equipment": GymEquipmentSerializer(equipment).data
+                "equipment": GymEquipmentSerializer(
+                    equipment
+                ).data
             })
 
         return Response(
@@ -6564,7 +6669,22 @@ def gym_equipment_detail(request, equipment_id):
             status=status.HTTP_400_BAD_REQUEST
         )
 
+    # -----------------------------------------
+    # DELETE
+    # TENANT_ADMIN / BRANCH_ADMIN ONLY
+    # -----------------------------------------
+
     if request.method == "DELETE":
+
+        if request.user.role == "STAFF":
+            return Response(
+                {
+                    "success": False,
+                    "error": "Staff cannot delete equipment."
+                },
+                status=status.HTTP_403_FORBIDDEN
+            )
+
         equipment.delete()
 
         return Response({
@@ -6572,150 +6692,6 @@ def gym_equipment_detail(request, equipment_id):
             "message": "Equipment deleted successfully"
         })
     
-
-
-from django.http import JsonResponse
-import json
-from datetime import datetime, date, timedelta
-
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework_simplejwt.tokens import RefreshToken
-from django.contrib.auth import authenticate
-from django.shortcuts import get_object_or_404
-from django.db.models import Sum
-
-import csv
-import io
-import uuid
-
-from .models import (
-    Branch, Enquiry, Expense, GymEquipment, Payment, Product,
-    Sales_product, Member, Income, MemberPause, Staffs, Plan,
-)
-from .serializers import GymEquipmentSerializer
-from .tenant_utils import get_tenant, get_branch_filter
-
-
-# ============================================================
-# IMPORT CSV  (tenant-stamped on every created row)
-# ============================================================
-
-IMPORT_CONFIG = {
-    "member": {
-        "model": Member,
-        "mapping": {
-            "first_name": "name",
-            "phone": "phone",
-            "email": "email",
-            "plan": "plan",
-            "age": "age",
-        },
-    },
-    "staff": {
-        "model": Staffs,
-        "mapping": {
-            "first_name": "name",
-            "number": "phone",
-            "salary": "salary",
-            "joindate": "joining_date",
-        },
-    },
-}
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def import_csv(request):
-    tenant = get_tenant(request)
-
-    csv_file = request.FILES.get("file")
-    model_type = request.data.get("model")
-
-    if not csv_file:
-        return Response({"success": False, "error": "CSV file is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    if not model_type:
-        return Response({"success": False, "error": "model is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-    config = IMPORT_CONFIG.get(model_type)
-    if not config:
-        return Response({"success": False, "error": f"Unsupported model: {model_type}"}, status=status.HTTP_400_BAD_REQUEST)
-
-    try:
-        decoded_file = csv_file.read().decode("utf-8-sig")
-        reader = csv.DictReader(io.StringIO(decoded_file))
-
-        Model = config["model"]
-        mapping = config["mapping"]
-
-        imported = []
-        skipped = []
-
-        for row_number, row in enumerate(reader, start=2):
-            try:
-                data = {"tenant": tenant}  # <-- stamp tenant on every imported row
-
-                for csv_field, model_field in mapping.items():
-                    value = row.get(csv_field, "")
-                    if value is not None:
-                        value = value.strip()
-                    if value != "":
-                        data[model_field] = value
-
-                if model_type == "member":
-                    data["id"] = str(uuid.uuid4())
-                    if "age" in data:
-                        data["age"] = int(data["age"])
-
-                if model_type == "staff":
-                    if "salary" in data:
-                        data["salary"] = float(data["salary"])
-
-                obj = Model.objects.create(**data)
-                imported.append({"row": row_number, "id": obj.id})
-
-            except Exception as e:
-                skipped.append({"row": row_number, "error": str(e)})
-
-        return Response({
-            "success": True,
-            "model": model_type,
-            "imported_count": len(imported),
-            "skipped_count": len(skipped),
-            "imported": imported,
-            "skipped": skipped,
-        })
-
-    except Exception as e:
-        return Response({"success": False, "error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-
-
-
-from django.http import JsonResponse
-from datetime import datetime, date, timedelta
-
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-
-from .models import Member, Plan, Branch, MemberPause
-from .tenant_utils import get_tenant, get_branch_filter
-
-# ============================================================
-# PLANS
-# ============================================================
-
-from datetime import date, datetime, timedelta
-from decimal import Decimal
-
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 from .models import Member, Income, Expense, Sales_product, Payment, Plan
 from .tenant_utils import get_tenant, get_branch_filter
@@ -6741,21 +6717,10 @@ from rest_framework import status
 from groq import Groq
 from .serializers import GymEquipmentSerializer
 from .tenant_utils import get_tenant, get_branch_filter
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def sell_product(request):
     tenant = get_tenant(request)
-
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "success": False,
-                "message": "Please select a tenant before selling a product."
-            },
-            status=400
-        )
 
     # Other users must belong to a tenant
     if tenant is None:
@@ -6797,6 +6762,7 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Validate required data
     # ---------------------------------------------------------
+
     if not product_id or not member_id:
         return JsonResponse(
             {
@@ -6818,6 +6784,7 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Get member within tenant + branch scope
     # ---------------------------------------------------------
+
     try:
         member = Member.objects.get(
             id=member_id,
@@ -6837,6 +6804,7 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Get product within selected tenant
     # ---------------------------------------------------------
+
     try:
         product = Product.objects.get(
             id=product_id,
@@ -6855,6 +6823,7 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Check stock
     # ---------------------------------------------------------
+
     if quantity > product.stock:
         return JsonResponse(
             {
@@ -6867,12 +6836,14 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Calculate sale amount
     # ---------------------------------------------------------
+
     unit_price = product.price
     total_amount = unit_price * quantity
 
     # ---------------------------------------------------------
     # Create sale
     # ---------------------------------------------------------
+
     sale = Sales_product.objects.create(
         tenant=tenant,
         branch=member.branch,
@@ -6887,6 +6858,7 @@ def sell_product(request):
     # ---------------------------------------------------------
     # Reduce product stock
     # ---------------------------------------------------------
+
     product.stock -= quantity
     product.save()
 
@@ -6899,21 +6871,10 @@ def sell_product(request):
         status=201
     )
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def validate_member(request, member_id):
     tenant = get_tenant(request)
-
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return JsonResponse(
-            {
-                "exists": False,
-                "error": "Please select a tenant before validating a member."
-            },
-            status=400
-        )
 
     # Other users must belong to a tenant
     if tenant is None:
@@ -6945,21 +6906,41 @@ def validate_member(request, member_id):
             },
             status=404
         )
-    
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def expenses(request):
-    tenant = get_tenant(request)
-    qs = Expense.objects.filter(tenant=tenant).order_by("-date", "-id")
+# @api_view(["GET"])
+# @permission_classes([IsAuthenticated])
+# def expenses(request):
+#     tenant = get_tenant(request)
 
-    data = [
-        {
-            "id": e.id, "title": e.title, "name": e.name, "phone": e.phone, "category": e.category,
-            "description": e.description, "amount": str(e.amount), "payment_method": e.payment_method,
-            "date": e.date.strftime("%Y-%m-%d"), "type": "Salary" if e.is_system_generated else "Additional",
-        }
-        for e in qs
-    ]
-    return JsonResponse(data, safe=False)
+#     qs = Expense.objects.filter(
+#         tenant=tenant
+#     ).order_by(
+#         "-date",
+#         "-id"
+#     )
+
+#     data = [
+#         {
+#             "id": e.id,
+#             "title": e.title,
+#             "name": e.name,
+#             "phone": e.phone,
+#             "category": e.category,
+#             "description": e.description,
+#             "amount": str(e.amount),
+#             "payment_method": e.payment_method,
+#             "date": e.date.strftime("%Y-%m-%d"),
+#             "type": (
+#                 "Salary"
+#                 if e.is_system_generated
+#                 else "Additional"
+#             ),
+#         }
+#         for e in qs
+#     ]
+
+#     return JsonResponse(
+#         data,
+#         safe=False
+#     )

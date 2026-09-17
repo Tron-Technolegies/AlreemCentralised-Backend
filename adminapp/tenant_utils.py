@@ -4,8 +4,7 @@ from .models import Tenant
 def get_tenant(request):
     user = request.user
 
-    # SUPER ADMIN has global access but does not belong to a tenant
-    if user.is_superuser or user.role == "SUPER_ADMIN":
+    if user.role == "SUPER_ADMIN":
 
         tenant_id = (
             request.data.get("tenant_id")
@@ -13,17 +12,18 @@ def get_tenant(request):
         )
 
         if tenant_id:
+
             try:
                 return Tenant.objects.get(
                     id=tenant_id,
                     is_active=True
                 )
+
             except Tenant.DoesNotExist:
                 return None
 
         return None
 
-    # Normal users must have a tenant
     if not user.tenant_id:
         return None
 
@@ -32,11 +32,12 @@ def get_tenant(request):
 
     return user.tenant
 
+
 def get_branch_filter(request, tenant):
 
     user = request.user
 
-    if user.is_superuser or user.role in [
+    if user.role in [
         "SUPER_ADMIN",
         "TENANT_ADMIN"
     ]:
@@ -46,6 +47,7 @@ def get_branch_filter(request, tenant):
         "BRANCH_ADMIN",
         "STAFF"
     ]:
+
         if not user.branch_id:
             return {
                 "branch_id": -1

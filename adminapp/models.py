@@ -47,12 +47,10 @@ from django.contrib.auth.models import AbstractUser
 class CustomUser(AbstractUser):
 
     ROLE_CHOICES = [
-        ("SUPER_ADMIN", "Super Admin"),
         ("TENANT_ADMIN", "Tenant Admin"),
         ("BRANCH_ADMIN", "Branch Admin"),
         ("STAFF", "Staff"),
     ]
-
     tenant = models.ForeignKey(
         Tenant,
         on_delete=models.CASCADE,
@@ -332,6 +330,13 @@ class GymEquipment(TenantBaseModel):
     name = models.CharField(max_length=255)
     quantity = models.PositiveIntegerField(default=1)
     is_available = models.BooleanField(default=True)
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="gym_equipment",
+        null=True,
+        blank=True,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
