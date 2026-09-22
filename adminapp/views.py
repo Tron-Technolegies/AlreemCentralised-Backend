@@ -2819,67 +2819,39 @@ def get_dashboard_stats(request):
         # TODAY
         # -----------------------------------------------
 
-        "today_income": today_income,
+        "total_income": f"{period_income:.2f}",
+        "total_sales": f"{period_sales:.2f}",
+        "total_expense": f"{period_expense:.2f}",
+        "total_profit": f"{period_profit:.2f}",
+        "period_loss": f"{period_loss:.2f}",
 
-        "today_sales": today_sales,
+        "today_income": f"{today_income:.2f}",
+        "today_sales": f"{today_sales:.2f}",
+        "today_expense": f"{today_expense:.2f}",
+        "today_profit": f"{today_profit:.2f}",
+        "today_loss": f"{today_loss:.2f}",
 
-        "today_expense": today_expense,
+        "monthly_income": f"{monthly_income:.2f}",
+        "monthly_sales": f"{monthly_sales:.2f}",
+        "monthly_expense": f"{monthly_expense:.2f}",
+        "monthly_profit": f"{monthly_profit:.2f}",
+        "monthly_loss": f"{monthly_loss:.2f}",
 
-        "today_profit": today_profit,
+        "yearly_income": f"{yearly_income:.2f}",
+        "yearly_sales": f"{yearly_sales:.2f}",
+        "yearly_expense": f"{yearly_expense:.2f}",
+        "yearly_profit": f"{yearly_profit:.2f}",
+        "yearly_loss": f"{yearly_loss:.2f}",
 
-        "today_loss": today_loss,
+        "all_time_income": f"{total_income:.2f}",
+        "all_time_sales": f"{total_product_income:.2f}",
+        "all_time_expense": f"{total_expense:.2f}",
+        "all_time_profit": f"{total_profit:.2f}",
+        "total_loss": f"{total_loss:.2f}",
 
-        # -----------------------------------------------
-        # MONTHLY
-        # -----------------------------------------------
-
-        "monthly_income": monthly_income,
-
-        "monthly_sales": monthly_sales,
-
-        "monthly_expense": monthly_expense,
-
-        "monthly_profit": monthly_profit,
-
-        "monthly_loss": monthly_loss,
-
-        # -----------------------------------------------
-        # YEARLY
-        # -----------------------------------------------
-
-        "yearly_income": yearly_income,
-
-        "yearly_sales": yearly_sales,
-
-        "yearly_expense": yearly_expense,
-
-        "yearly_profit": yearly_profit,
-
-        "yearly_loss": yearly_loss,
-
-        # -----------------------------------------------
-        # ALL TIME
-        # -----------------------------------------------
-
-        "all_time_income": total_income,
-
-        "all_time_sales": total_sales,
-
-        "all_time_expense": total_expense,
-
-        "all_time_profit": total_profit,
-
-        "total_loss": total_loss,
-
-        # -----------------------------------------------
-        # CATEGORY INCOME
-        # -----------------------------------------------
-
-        "membership_income": membership_income,
-
-        "product_income": product_income,
-
-        "admission_income": admission_income,
+        "membership_income": f"{membership_income:.2f}",
+        "product_income": f"{product_income:.2f}",
+        "admission_income": f"{admission_income:.2f}",
 
         # -----------------------------------------------
         # GROWTH
@@ -4029,6 +4001,12 @@ def create_staff(request):
         status=201
     )
 
+from django.db.models import Sum
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from django.http import JsonResponse
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -4042,6 +4020,10 @@ def get_staffs(request):
             status=403
         )
 
+    # ----------------------------------
+    # GET STAFFS
+    # ----------------------------------
+
     staffs = (
         Staffs.objects
         .filter(tenant=tenant)
@@ -4049,7 +4031,10 @@ def get_staffs(request):
         .order_by("-id")
     )
 
-    # Branch users → own branch only
+    # ----------------------------------
+    # BRANCH RESTRICTION
+    # ----------------------------------
+
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
 
         if not request.user.branch_id:
@@ -4062,16 +4047,32 @@ def get_staffs(request):
             branch_id=request.user.branch_id
         )
 
+    # ----------------------------------
+    # RESPONSE DATA
+    # ----------------------------------
+
     data = []
 
     for staff in staffs:
+
+        # ----------------------------------
+        # TOTAL PAID
+        #
+        # Includes ALL payment types:
+        # Salary
+        # Incentive
+        # Bonus
+        # Commission
+        # Advance
+        # Overtime
+        # Other
+        # ----------------------------------
 
         paid_amount = (
             Payment.objects
             .filter(
                 tenant=tenant,
-                staff=staff,
-                payment_type="Salary"
+                staff=staff
             )
             .aggregate(
                 total=Sum("amount")
@@ -4087,8 +4088,14 @@ def get_staffs(request):
             "phone": staff.phone,
             "experience": staff.experience,
             "joining_date": staff.joining_date,
-            "salary": str(staff.salary),
-            "paid_amount": str(paid_amount),
+
+            # "salary": str(staff.salary),
+            "salary": f"{staff.salary:.2f}",
+
+            # ALL payment transactions
+            # "paid_amount": str(paid_amount),
+            "paid_amount": f"{paid_amount:.2f}",
+
             "status": staff.status,
 
             "branch": (
@@ -4119,6 +4126,10 @@ def get_staff(request, staff_id):
             status=403
         )
 
+    # ----------------------------------
+    # GET STAFF
+    # ----------------------------------
+
     try:
         staff = (
             Staffs.objects
@@ -4128,13 +4139,18 @@ def get_staff(request, staff_id):
                 tenant=tenant
             )
         )
+
     except Staffs.DoesNotExist:
+
         return JsonResponse(
             {"error": "Staff not found"},
             status=404
         )
 
-    # Branch restriction
+    # ----------------------------------
+    # BRANCH RESTRICTION
+    # ----------------------------------
+
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
 
         if not request.user.branch_id:
@@ -4145,16 +4161,23 @@ def get_staff(request, staff_id):
 
         if staff.branch_id != request.user.branch_id:
             return JsonResponse(
-                {"error": "You are not permitted to access this staff member"},
+                {
+                    "error": "You are not permitted to access this staff member"
+                },
                 status=403
             )
+
+    # ----------------------------------
+    # TOTAL PAID
+    #
+    # Includes ALL payment types
+    # ----------------------------------
 
     paid_amount = (
         Payment.objects
         .filter(
             tenant=tenant,
-            staff=staff,
-            payment_type="Salary"
+            staff=staff
         )
         .aggregate(
             total=Sum("amount")
@@ -4162,7 +4185,12 @@ def get_staff(request, staff_id):
         or 0
     )
 
+    # ----------------------------------
+    # RESPONSE
+    # ----------------------------------
+
     return JsonResponse({
+
         "id": staff.id,
         "name": staff.name,
         "role": staff.role,
@@ -4170,8 +4198,14 @@ def get_staff(request, staff_id):
         "phone": staff.phone,
         "experience": staff.experience,
         "joining_date": staff.joining_date,
-        "salary": str(staff.salary),
-        "paid_amount": str(paid_amount),
+
+        # "salary": str(staff.salary),
+        "salary": f"{staff.salary:.2f}",
+
+        # ALL payment transactions
+        # "paid_amount": str(paid_amount),
+        "paid_amount": f"{paid_amount:.2f}",
+
         "status": staff.status,
 
         "branch": (
@@ -4723,6 +4757,7 @@ def add_member_payment(request, member_id):
     # Create income transaction
     income = Income.objects.create(
         tenant=tenant,
+        branch=member.branch,
         member=member,
         title="Membership",
         name=member.name,
@@ -5038,6 +5073,13 @@ def add_expense(request):
     }, status=201)
 
 
+import json
+
+from django.http import JsonResponse
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_staff_payment(request, staff_id):
@@ -5049,7 +5091,10 @@ def add_staff_payment(request, staff_id):
             "error": "User is not assigned to a tenant"
         }, status=403)
 
-    # Tenant Admin and Branch Admin can pay staff
+    # ----------------------------------
+    # PERMISSION
+    # ----------------------------------
+
     if request.user.role not in [
         "TENANT_ADMIN",
         "BRANCH_ADMIN"
@@ -5057,6 +5102,10 @@ def add_staff_payment(request, staff_id):
         return JsonResponse({
             "error": "Only Tenant Admin and Branch Admin can record staff payments"
         }, status=403)
+
+    # ----------------------------------
+    # PARSE JSON
+    # ----------------------------------
 
     try:
         data = json.loads(request.body)
@@ -5123,7 +5172,7 @@ def add_staff_payment(request, staff_id):
         }, status=400)
 
     # ----------------------------------
-    # PAYMENT DETAILS
+    # PAYMENT TYPE
     # ----------------------------------
 
     payment_type = data.get(
@@ -5131,13 +5180,17 @@ def add_staff_payment(request, staff_id):
         "Salary"
     )
 
+    # ----------------------------------
+    # DESCRIPTION
+    # ----------------------------------
+
     description = data.get(
         "description",
         ""
     )
 
     # ----------------------------------
-    # CREATE PAYMENT RECORD
+    # CREATE PAYMENT
     # ----------------------------------
 
     payment = Payment.objects.create(
@@ -5150,30 +5203,35 @@ def add_staff_payment(request, staff_id):
     )
 
     # ----------------------------------
-    # CREATE EXPENSE RECORD
+    # CREATE EXPENSE
     # ----------------------------------
 
     expense = Expense.objects.create(
         tenant=tenant,
-
-        # Important:
-        # Save the staff's branch so branch-level
-        # expense filtering works correctly.
         branch=staff.branch,
 
         title=payment_type,
         name=staff.name,
         phone=staff.phone,
+
         category="salary",
+
         amount=amount,
+
         payment_method=payment_method,
         date=payment_date,
+
         description=(
             description
             or f"{payment_type} paid to {staff.name}"
         ),
+
         is_system_generated=True,
     )
+
+    # ----------------------------------
+    # RETURN
+    # ----------------------------------
 
     return JsonResponse({
         "message": "Staff payment recorded successfully",
@@ -5184,13 +5242,15 @@ def add_staff_payment(request, staff_id):
         "staff_id": staff.id,
         "staff_name": staff.name,
 
-        "amount": str(payment.amount),
+        "amount": f"{payment.amount:.2f}",
+
         "payment_type": payment_type,
 
         "branch": {
             "id": staff.branch.id,
             "name": staff.branch.name
         } if staff.branch else None,
+
     }, status=201)
 
 
