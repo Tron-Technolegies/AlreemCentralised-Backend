@@ -57,9 +57,6 @@ urlpatterns = [
     path("staff/update/<int:id>/", views.update_staff,name="update_staff"),
     path("staff/delete/<int:staff_id>/", views.delete_staff,name="delete_staff"),
 
-    path("member/pause/<str:member_id>/",views.pause_member,name="pause_member"),
-    path("member/resume/<str:member_id>/",views.resume_member,name="resume_member"),
-
     path('member/<str:member_id>/payments/add/', views.add_member_payment,name="add_member_payment"),
     path('staff/<int:staff_id>/payments/add/', views.add_staff_payment,name="add_staff_payment"),
 
@@ -76,20 +73,23 @@ urlpatterns = [
     path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
     path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
 #    path("gym-equipment/create/",views.create_gym_equipment ),
-    path(
-        "gym-equipment/",
-        views.gym_equipment,
-        name="gym_equipment"
-    ),
 
-    path(
-        "gym-equipment/<int:equipment_id>/",
-        views.gym_equipment_detail,
-        name="gym_equipment_detail"
-    ),
+    path("gym-equipment/",views.gym_equipment,name="gym_equipment"),
+    path("gym-equipment/<int:equipment_id>/",views.gym_equipment_detail,name="gym_equipment_detail"),
 
     path("generate-diet/",views.generate_diet,name="generate-diet"),
     path("generate_workout/",views.generate_workout,name="generate_workout"),
-    
+    path("workout/<str:member_id>/complete/",views.complete_workout_day,name="complete_workout_day"),
+
+
     # path("import-csv/",views.import_csv, name="import_csv"),
+    path("essl/sync-employees/",views.essl_sync_employees,name="essl_sync_employees"),
+    path("essl/test-employees/",views.essl_test_employees,name="essl_test_employees",),
+    path("list_biometric_mappings/",views.list_biometric_mappings,name="list_biometric_mappings"),
+    path("essl/mappings/<int:mapping_id>/link/",views.link_biometric_employee,name="link_biometric_employee"),
+    path("essl/mappings/<int:mapping_id>/unlink/",views.unlink_biometric_employee,name="unlink_biometric_employee",),
+
+    path("attendance/sync/",views.sync_essl_attendance,name="sync-essl-attendance",),
+    path("attendance/",views.list_attendance,name="list-attendance",),
+    
 ]

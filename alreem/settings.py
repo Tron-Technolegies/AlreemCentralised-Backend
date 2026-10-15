@@ -63,6 +63,14 @@ REST_FRAMEWORK = {
 
 from datetime import timedelta
 
+# eSSL SOAP configuration
+
+ESSL_SOAP_URL = os.getenv("ESSL_SOAP_URL")
+ESSL_USERNAME = os.getenv("ESSL_USERNAME")
+ESSL_PASSWORD = os.getenv("ESSL_PASSWORD")
+ESSL_EMPLOYEE_LOCATION = os.getenv("ESSL_EMPLOYEE_LOCATION", "TCR")
+
+
 # settings.py
 
 EBIOSERVER_API_URL = os.getenv(
@@ -120,16 +128,17 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': os.getenv('DB_NAME'),
-#         'HOST': os.getenv('DB_HOST'),
-#         'PORT': os.getenv('DB_PORT'),
-#         'USER': os.getenv('DB_USER'),
-#         'PASSWORD': os.getenv('DB_PASSWORD'),
-#     }
-# }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('DB_NAME'),
+        'HOST': os.getenv('DB_HOST'),
+        'PORT': os.getenv('DB_PORT'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+    }
+}
+
 
 # DATABASES = {
 #     "default": {
@@ -142,13 +151,13 @@ EXERCISE_API_KEY = os.getenv(
     "EXERCISE_API_KEY"
 )
 
-import dj_database_url
+# import dj_database_url
 
-DATABASES = {
-    "default": dj_database_url.config(
-        default=os.environ.get("DB_URL")
-    )
-}
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         default=os.environ.get("DB_URL")
+#     )
+# }
 
 # GENERATE_EXERCISE_IMAGES = FALse
 HF_TOKEN = os.getenv("HF_TOKEN")

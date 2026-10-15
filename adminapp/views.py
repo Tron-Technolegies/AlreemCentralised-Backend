@@ -4,7 +4,6 @@ from datetime import datetime, date, timedelta
 
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
-from rest_framework.response import Response
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
@@ -19,6 +18,58 @@ from django.contrib.auth.decorators import login_required
 from django.http import JsonResponse
 from functools import wraps
 
+import json
+from datetime import datetime, timedelta
+
+from django.http import JsonResponse
+from rest_framework.permissions import IsAuthenticated
+
+from .models import Member, MemberPause
+
+# Membership pause policy
+
+
+from django.utils import timezone
+
+PAUSE_POLICIES = {
+    30:  {"max_days": 0,  "max_requests": 0},
+    60:  {"max_days": 7,  "max_requests": 1},
+    90:  {"max_days": 15, "max_requests": 2},
+    180: {"max_days": 30, "max_requests": 3},
+    365: {"max_days": 45, "max_requests": 4},
+}
+
+
+def get_pause_policy(member):
+    if not member.plan:
+        return {"max_days": 0, "max_requests": 0}
+
+    return PAUSE_POLICIES.get(
+        member.plan.duration,
+        {"max_days": 0, "max_requests": 0}
+    )
+
+
+def get_membership_pause_usage(member):
+    """Return pause records and usage for the current membership cycle."""
+    if not member.membership_start_date:
+        return MemberPause.objects.none(), 0, 0
+
+    pauses = MemberPause.objects.filter(
+        tenant=member.tenant,
+        member=member,
+        start_date__gte=member.membership_start_date,
+    )
+
+    request_count = pauses.count()
+
+    used_days = sum(
+        pause.paused_days
+        for pause in pauses
+        if pause.end_date is not None
+    )
+
+    return pauses, request_count, used_days
 
 def role_required(allowed_roles):
     def decorator(view_func):
@@ -301,8 +352,6 @@ def admin_profile_view(request):
 from django.http import JsonResponse
 from datetime import datetime, date, timedelta
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 from .models import Member, Plan, Branch, MemberPause
 from .tenant_utils import get_tenant, get_branch_filter
@@ -311,6 +360,7 @@ from .tenant_utils import get_tenant, get_branch_filter
 # ============================================================
 # MEMBERS
 # ============================================================
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_member(request):
@@ -587,23 +637,15 @@ def create_member(request):
             plan=plan,
 
             branch=branch,
-
             join_date=join_date,
-
+            membership_start_date=join_date,
             photo=photo,
-
             height=height,
-
             weight=weight,
-
             bmi=bmi,
-
             goal=goal,
-
             food_category=food_category,
-
             age=request.POST.get("age"),
-
             blood_group=request.POST.get(
                 "blood_group"
             ),
@@ -648,32 +690,46 @@ def create_member(request):
 
 
 def auto_resume_member(member, today):
-    if member.is_paused and member.pause_expiry_date:
-        if today >= member.pause_expiry_date:
-            active_pause = MemberPause.objects.filter(
-                member=member,
-                end_date__isnull=True
-            ).first()
+    if not member.is_paused or not member.pause_expiry_date:
+        return
 
-            if active_pause:
-                paused_days = (
-                    today - active_pause.start_date
-                ).days
+    if today < member.pause_expiry_date:
+        return
 
-                active_pause.end_date = today
-                active_pause.paused_days = paused_days
-                active_pause.save()
+    pause = MemberPause.objects.filter(
+        tenant=member.tenant,
+        member=member,
+        end_date__isnull=True,
+    ).order_by("-start_date").first()
 
-                if member.expiry_date:
-                    member.expiry_date += timedelta(
-                        days=paused_days
-                    )
+    if pause:
+        # Use the approved end date, not today's date.
+        actual_resume_date = member.pause_expiry_date
 
-            member.is_paused = False
-            member.pause_start_date = None
-            member.pause_expiry_date = None
-            member.status = "Active"
-            member.save()
+        paused_days = (
+            actual_resume_date - pause.start_date
+        ).days
+
+        paused_days = max(
+            0, min(paused_days, pause.allowed_days)
+        )
+
+        pause.end_date = actual_resume_date
+        pause.paused_days = paused_days
+        pause.save()
+
+        if member.expiry_date:
+            member.expiry_date += timedelta(days=paused_days)
+
+    _, _, used_days = get_membership_pause_usage(member)
+
+    member.is_paused = False
+    member.pause_start_date = None
+    member.pause_expiry_date = None
+    member.used_pause_days = used_days
+    member.status = "Active"
+    member.save()
+
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -788,35 +844,21 @@ def get_members(request):
         data.append({
 
             "id": member.id,
-
             "name": member.name,
-
             "phone": member.phone,
-
             "email": member.email,
-
             "age": member.age,
-
             "gender": member.gender,
-
             "blood_group": member.blood_group,
-
             "location": member.location,
-
             "height": member.height,
-
             "weight": member.weight,
-
             "bmi": member.bmi,
-
-            "goal": member.get_goal_display(),
 
             "food_category": (
                 member.get_food_category_display()
             ),
 
-            # IMPORTANT:
-            # Do not return member.plan directly.
             "plan": (
                 {
                     "id": member.plan.id,
@@ -828,8 +870,6 @@ def get_members(request):
                 else None
             ),
 
-            # IMPORTANT:
-            # Do not return member.branch directly.
             "branch": (
                 {
                     "id": member.branch.id,
@@ -841,7 +881,6 @@ def get_members(request):
             ),
 
             "join_date": member.join_date,
-
             "expiry_date": (
                 member.expiry_date.isoformat()
                 if member.expiry_date
@@ -849,11 +888,8 @@ def get_members(request):
             ),
 
             "paid_amount": member.paid_amount,
-
             "due_amount": member.due_amount,
-
             "status": member.status,
-
             "photo": (
                 member.photo.url
                 if member.photo
@@ -873,18 +909,12 @@ def get_members(request):
             ),
 
             "is_paused": member.is_paused,
-
             "pause_days_used": used_days,
-
             "pause_days_remaining": remaining_days,
-
             "pause_count": pause_count,
         })
 
-    return JsonResponse(
-        data,
-        safe=False
-    )
+    return JsonResponse(data,safe=False)
 
 
 @api_view(["GET"])
@@ -929,38 +959,41 @@ def get_member(request, member_id):
 
         elif member.expiry_date:
 
-            today = date.today()
+            today = timezone.localdate()
 
             if member.expiry_date < today:
-
-                days_expired = (
-                    today -
-                    member.expiry_date
-                ).days
-
+                days_expired = (today -member.expiry_date).days
                 if days_expired <= 7:
-
                     member_status = "Expired"
-
                 else:
-
                     member_status = "Blocked"
-
             else:
-
                 member_status = "Active"
-
         else:
-
             member_status = "Active"
-
         if member.status != member_status:
-
             member.status = member_status
-
             member.save(
                 update_fields=["status"]
             )
+
+            
+        # -------------------------------------------------
+        # Membership pause policy and usage
+        # -------------------------------------------------
+        policy = get_pause_policy(member)
+
+        _, pause_count, pause_days_used = (
+            get_membership_pause_usage(member)
+        )
+
+        pause_days_remaining = max(
+            0, policy["max_days"] - pause_days_used
+        )
+
+        remaining_pause_requests = max(
+            0, policy["max_requests"] - pause_count
+        )
 
         # -------------------------------------------------
         # Response
@@ -969,13 +1002,9 @@ def get_member(request, member_id):
         return JsonResponse(
             {
                 "id": member.id,
-
                 "name": member.name,
-
                 "phone": member.phone,
-
                 "email": member.email,
-
                 "plan": (
                     {
                         "id": member.plan.id,
@@ -998,9 +1027,7 @@ def get_member(request, member_id):
                 ),
 
                 "join_date": member.join_date,
-
                 "status": member_status,
-
                 "photo": (
                     member.photo.url
                     if member.photo
@@ -1008,29 +1035,17 @@ def get_member(request, member_id):
                 ),
 
                 "height": member.height,
-
                 "weight": member.weight,
-
                 "bmi": member.bmi,
-
                 "age": member.age,
-
                 "goal": member.goal,
-
                 "food_category": member.food_category,
-
                 "blood_group": member.blood_group,
-
                 "location": member.location,
-
                 "adhaar_number": member.adhaar_number,
-
                 "gender": member.gender,
-
                 "paid_amount": member.paid_amount,
-
                 "due_amount": member.due_amount,
-
                 "expiry_date": (
                     member.expiry_date.isoformat()
                     if member.expiry_date
@@ -1039,40 +1054,36 @@ def get_member(request, member_id):
 
                 "is_paused": member.is_paused,
 
+                "max_pause_days": policy["max_days"],
+                "max_pause_requests": policy["max_requests"],
+                "pause_days_used": pause_days_used,
+                "pause_days_remaining": pause_days_remaining,
+                "pause_count": pause_count,
+                "remaining_pause_requests": remaining_pause_requests,
                 "pause_start_date": (
                     member.pause_start_date.isoformat()
                     if member.pause_start_date
                     else None
                 ),
+                "membership_start_date": (
+                member.membership_start_date.isoformat()
+                if member.membership_start_date
+                else None
+            ),
 
                 "used_pause_days": member.used_pause_days,
-
                 "pause_expiry_date": (
                     member.pause_expiry_date.isoformat()
                     if member.pause_expiry_date
                     else None
-                ),
-            },
-            status=200
-        )
+                ),},status=200)
 
     except Member.DoesNotExist:
-
-        return JsonResponse(
-            {
-                "error": "Member not found"
-            },
-            status=404
-        )
-
+        return JsonResponse({"error": "Member not found"},status=404)
     except Exception as e:
-
-        return JsonResponse(
-            {
-                "error": str(e)
-            },
-            status=500
-        )
+        return JsonResponse({"error": str(e)},status=500)
+    
+    
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_member(request, member_id):
@@ -1951,8 +1962,6 @@ from decimal import Decimal
 from django.db.models import Sum
 from django.http import JsonResponse
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 from .models import (
     Member,
@@ -2886,6 +2895,8 @@ def get_dashboard_stats(request):
     })
 
 
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_payments(request):
@@ -3011,99 +3022,6 @@ def get_payments(request):
         })
 
     return JsonResponse(data, safe=False)
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def renew_member(request, member_id):
-
-    tenant = get_tenant(request)
-
-    # All users must belong to a tenant
-    if tenant is None:
-        return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
-            status=403
-        )
-
-    # STAFF cannot renew
-    if request.user.role == "STAFF":
-        return JsonResponse(
-            {"error": "Staff members are not allowed to renew members"},
-            status=403
-        )
-
-    # Find member only inside tenant + allowed branch
-    try:
-        member = Member.objects.get(
-            id=member_id,
-            tenant=tenant,
-            **get_branch_filter(request, tenant)
-        )
-    except Member.DoesNotExist:
-        return JsonResponse(
-            {"error": "Member not found or access denied"},
-            status=404
-        )
-
-    # Get plan
-    plan_id = request.POST.get("plan")
-
-    if not plan_id:
-        return JsonResponse(
-            {"error": "Plan is required"},
-            status=400
-        )
-
-    try:
-        plan = Plan.objects.get(
-            id=plan_id,
-            tenant=tenant
-        )
-    except (Plan.DoesNotExist, ValueError):
-        return JsonResponse(
-            {"error": "Invalid plan"},
-            status=400
-        )
-
-    duration = int(plan.duration)
-    today = date.today()
-
-    # Extend from current expiry if still active
-    if member.expiry_date and member.expiry_date >= today:
-        member.expiry_date = (
-            member.expiry_date +
-            timedelta(days=duration)
-        )
-    else:
-        member.expiry_date = (
-            today +
-            timedelta(days=duration)
-        )
-
-    # IMPORTANT:
-    # Member.plan is a ForeignKey
-    member.plan = plan
-
-    member.status = "Active"
-    member.is_paused = False
-    member.pause_start_date = None
-    member.pause_expiry_date = None
-
-    member.save()
-
-    return JsonResponse({
-        "message": "Plan renewed successfully",
-        "member_id": member.id,
-        "member_name": member.name,
-        "plan": {
-            "id": plan.id,
-            "name": plan.name,
-            "duration": plan.duration,
-            "price": plan.price,
-        },
-        "new_expiry_date": member.expiry_date.isoformat(),
-        "status": member.status,
-    })
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -3404,10 +3322,7 @@ from django.conf import settings
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
 from groq import Groq
 
 from .serializers import GymEquipmentSerializer
@@ -4003,8 +3918,6 @@ def create_staff(request):
 
 from django.db.models import Sum
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 from django.http import JsonResponse
 
 
@@ -4055,19 +3968,6 @@ def get_staffs(request):
 
     for staff in staffs:
 
-        # ----------------------------------
-        # TOTAL PAID
-        #
-        # Includes ALL payment types:
-        # Salary
-        # Incentive
-        # Bonus
-        # Commission
-        # Advance
-        # Overtime
-        # Other
-        # ----------------------------------
-
         paid_amount = (
             Payment.objects
             .filter(
@@ -4108,10 +4008,7 @@ def get_staffs(request):
             ),
         })
 
-    return JsonResponse(
-        data,
-        safe=False
-    )
+    return JsonResponse(data,safe=False)
 
 
 @api_view(["GET"])
@@ -4384,6 +4281,13 @@ def delete_staff(request, staff_id):
 # ============================================================
 # PAUSE / RESUME
 # ============================================================
+
+import json
+from datetime import datetime, timedelta
+
+from django.db import transaction
+from django.http import JsonResponse
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def pause_member(request, member_id):
@@ -4391,151 +4295,178 @@ def pause_member(request, member_id):
 
     if tenant is None:
         return JsonResponse({
-            "error": "User is not assigned to a tenant"
+            "success": False,
+            "error": "User is not assigned to a tenant."
         }, status=403)
 
-    # STAFF cannot pause members
     if request.user.role == "STAFF":
         return JsonResponse({
-            "error": "Staff members are not allowed to pause members"
+            "success": False,
+            "error": "Staff members are not allowed to pause members."
         }, status=403)
 
     try:
-        member = Member.objects.get(
-            id=member_id,
-            tenant=tenant,
-            **get_branch_filter(request, tenant)
-        )
-    except Member.DoesNotExist:
-        return JsonResponse({
-            "error": "Member not found or access denied"
-        }, status=404)
-
-    if member.is_paused:
-        return JsonResponse({
-            "success": False,
-            "message": "Member already paused",
-            "paused_date": (
-                member.pause_start_date.strftime("%Y-%m-%d")
-                if member.pause_start_date else None
-            ),
-        }, status=400)
-
-    # Parse request body
-    try:
-        body = json.loads(request.body)
         freeze_date = datetime.strptime(
-            body["freeze_date"],
+            str(request.data.get("freeze_date", "")),
             "%Y-%m-%d"
         ).date()
-    except (KeyError, ValueError, json.JSONDecodeError):
+    except (ValueError, TypeError):
         return JsonResponse({
             "success": False,
-            "error": "Valid freeze_date is required (YYYY-MM-DD)"
+            "error": "Valid freeze_date is required (YYYY-MM-DD)."
         }, status=400)
 
-    # Calculate month range
-    month_start = freeze_date.replace(day=1)
+    today = timezone.localdate()
 
-    if freeze_date.month == 12:
-        next_month = freeze_date.replace(
-            year=freeze_date.year + 1,
-            month=1,
-            day=1
+    if freeze_date > today:
+        return JsonResponse({
+            "success": False,
+            "error": "Future pause dates are not allowed."
+        }, status=400)
+
+    with transaction.atomic():
+        try:
+            member = Member.objects.select_for_update().get(
+                id=member_id,
+                tenant=tenant,
+                **get_branch_filter(request, tenant)
+            )
+        except Member.DoesNotExist:
+            return JsonResponse({
+                "success": False,
+                "error": "Member not found or access denied."
+            }, status=404)
+
+        if member.is_paused:
+            return JsonResponse({
+                "success": False,
+                "error": "Member is already paused."
+            }, status=400)
+
+        if not member.plan or not member.membership_start_date:
+            return JsonResponse({
+                "success": False,
+                "error": (
+                    "A membership plan and membership start date "
+                    "are required."
+                )
+            }, status=400)
+
+        if member.plan.tenant_id != tenant.id:
+            return JsonResponse({
+                "success": False,
+                "error": "Member plan does not belong to this tenant."
+            }, status=400)
+
+        if freeze_date < member.membership_start_date:
+            return JsonResponse({
+                "success": False,
+                "error": (
+                    "Pause date cannot be before the current "
+                    "membership start date."
+                )
+            }, status=400)
+
+        if member.expiry_date and freeze_date >= member.expiry_date:
+            return JsonResponse({
+                "success": False,
+                "error": "Cannot pause a membership on or after its expiry date."
+            }, status=400)
+
+        if member.expiry_date and member.expiry_date < today:
+            return JsonResponse({
+                "success": False,
+                "error": "Cannot pause an expired membership."
+            }, status=400)
+
+        policy = get_pause_policy(member)
+        max_days = policy["max_days"]
+        max_requests = policy["max_requests"]
+
+        if max_days <= 0 or max_requests <= 0:
+            return JsonResponse({
+                "success": False,
+                "error": "Pause is not available for this membership plan.",
+                "max_pause_days": max_days,
+                "max_pause_requests": max_requests
+            }, status=400)
+
+        active_pause_exists = MemberPause.objects.filter(
+            tenant=tenant,
+            member=member,
+            end_date__isnull=True
+        ).exists()
+
+        if active_pause_exists:
+            return JsonResponse({
+                "success": False,
+                "error": "An active pause record already exists."
+            }, status=400)
+
+        _, request_count, used_days = get_membership_pause_usage(member)
+
+        if request_count >= max_requests:
+            return JsonResponse({
+                "success": False,
+                "error": "Maximum pause requests for this membership have been used.",
+                "used_requests": request_count,
+                "max_pause_requests": max_requests
+            }, status=400)
+
+        remaining_days = max(0, max_days - used_days)
+
+        if remaining_days <= 0:
+            return JsonResponse({
+                "success": False,
+                "error": "Maximum pause days for this membership have been used.",
+                "used_days": used_days,
+                "remaining_days": 0,
+                "max_pause_days": max_days
+            }, status=400)
+
+        allowed_days = remaining_days
+        allowed_resume_date = freeze_date + timedelta(days=allowed_days)
+
+        pause = MemberPause.objects.create(
+            tenant=tenant,
+            member=member,
+            start_date=freeze_date,
+            allowed_days=allowed_days,
+            paused_days=0
         )
-    else:
-        next_month = freeze_date.replace(
-            month=freeze_date.month + 1,
-            day=1
-        )
 
-    month_end = next_month - timedelta(days=1)
+        member.is_paused = True
+        member.pause_start_date = freeze_date
+        member.pause_expiry_date = allowed_resume_date
+        member.used_pause_days = used_days
+        member.status = "Paused"
 
-    # Maximum 2 pauses per month
-    pause_count = MemberPause.objects.filter(
-        tenant=tenant,
-        member=member,
-        start_date__gte=month_start,
-        start_date__lte=month_end
-    ).count()
-
-    if pause_count >= 2:
-        return JsonResponse({
-            "success": False,
-            "error": "Maximum 2 pauses are allowed per month.",
-            "pause_count": pause_count,
-            "max_pauses": 2
-        }, status=400)
-
-    # Calculate used pause days
-    previous_pauses = MemberPause.objects.filter(
-        tenant=tenant,
-        member=member,
-        start_date__gte=month_start,
-        start_date__lte=month_end,
-        end_date__isnull=False
-    )
-
-    used_days = sum(
-        pause.paused_days
-        for pause in previous_pauses
-    )
-
-    remaining_days = max(0, 15 - used_days)
-
-    if remaining_days <= 0:
-        return JsonResponse({
-            "success": False,
-            "error": "Member has already used the maximum 15 pause days this month.",
-            "used_days": used_days,
-            "remaining_days": 0,
-            "max_pause_days": 15
-        }, status=400)
-
-    allowed_days = remaining_days
-
-    allowed_resume_date = (
-        freeze_date + timedelta(days=allowed_days)
-    )
-
-    # Create pause record
-    pause = MemberPause.objects.create(
-        tenant=tenant,
-        member=member,
-        start_date=freeze_date,
-        allowed_days=allowed_days,
-        paused_days=0
-    )
-
-    # Update member
-    member.is_paused = True
-    member.pause_start_date = freeze_date
-    member.pause_expiry_date = allowed_resume_date
-    member.status = "Paused"
-    member.used_pause_days = used_days
-    member.save()
+        member.save(update_fields=[
+            "is_paused",
+            "pause_start_date",
+            "pause_expiry_date",
+            "used_pause_days",
+            "status"
+        ])
 
     return JsonResponse({
         "success": True,
-        "message": "Member paused successfully",
+        "message": "Member paused successfully.",
         "pause_id": pause.id,
-
-        "pause_start_date": freeze_date.strftime("%Y-%m-%d"),
-
+        "pause_start_date": freeze_date.isoformat(),
         "pause_days_used": used_days,
         "pause_days_remaining": remaining_days,
-
-        "pause_count": pause_count + 1,
-        "allowed_days": allowed_days,
-
-        "allowed_resume_date": (
-            allowed_resume_date.strftime("%Y-%m-%d")
+        "pause_count": request_count + 1,
+        "remaining_pause_requests": max(
+            0, max_requests - request_count - 1
         ),
-
+        "allowed_days": allowed_days,
+        "allowed_resume_date": allowed_resume_date.isoformat(),
+        "max_pause_days": max_days,
+        "max_pause_requests": max_requests,
         "status": member.status,
-        "is_paused": member.is_paused,
+        "is_paused": member.is_paused
     })
-
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -4544,156 +4475,279 @@ def resume_member(request, member_id):
 
     if tenant is None:
         return JsonResponse({
-            "error": "User is not assigned to a tenant"
+            "success": False,
+            "error": "User is not assigned to a tenant."
         }, status=403)
 
-    # STAFF cannot resume
     if request.user.role == "STAFF":
         return JsonResponse({
-            "error": "Staff members are not allowed to resume members"
+            "success": False,
+            "error": "Staff members are not allowed to resume members."
         }, status=403)
 
     try:
-        member = Member.objects.get(
-            id=member_id,
-            tenant=tenant,
-            **get_branch_filter(request, tenant)
-        )
-    except Member.DoesNotExist:
-        return JsonResponse({
-            "error": "Member not found or access denied"
-        }, status=404)
-
-    if not member.is_paused:
-        return JsonResponse({
-            "success": False,
-            "message": "Member is not paused"
-        }, status=400)
-
-    # Parse resume date
-    try:
-        body = json.loads(request.body)
-
         resume_date = datetime.strptime(
-            body["resume_date"],
+            str(request.data.get("resume_date", "")),
             "%Y-%m-%d"
         ).date()
-
-    except (KeyError, ValueError, json.JSONDecodeError):
+    except (ValueError, TypeError):
         return JsonResponse({
             "success": False,
-            "error": "Valid resume_date is required (YYYY-MM-DD)"
+            "error": "Valid resume_date is required (YYYY-MM-DD)."
         }, status=400)
 
-    # Find active pause
-    pause = (
-        MemberPause.objects
-        .filter(
+    today = timezone.localdate()
+
+    if resume_date > today:
+        return JsonResponse({
+            "success": False,
+            "error": "Future resume dates are not allowed."
+        }, status=400)
+
+    with transaction.atomic():
+        try:
+            member = Member.objects.select_for_update().get(
+                id=member_id,
+                tenant=tenant,
+                **get_branch_filter(request, tenant)
+            )
+        except Member.DoesNotExist:
+            return JsonResponse({
+                "success": False,
+                "error": "Member not found or access denied."
+            }, status=404)
+
+        if not member.is_paused:
+            return JsonResponse({
+                "success": False,
+                "error": "Member is not currently paused."
+            }, status=400)
+
+        pause = MemberPause.objects.select_for_update().filter(
             tenant=tenant,
             member=member,
             end_date__isnull=True
-        )
-        .order_by("-start_date")
-        .first()
-    )
+        ).order_by("-start_date").first()
 
-    if not pause:
-        return JsonResponse({
-            "success": False,
-            "error": "Active pause record not found."
-        }, status=400)
+        if pause is None:
+            return JsonResponse({
+                "success": False,
+                "error": (
+                    "Active pause record not found. "
+                    "Administrator assistance is required."
+                )
+            }, status=400)
 
-    pause_start = pause.start_date
+        if resume_date <= pause.start_date:
+            return JsonResponse({
+                "success": False,
+                "error": "Resume date must be after the pause start date."
+            }, status=400)
 
-    paused_days = (
-        resume_date - pause_start
-    ).days
+        if not member.plan:
+            return JsonResponse({
+                "success": False,
+                "error": "Member does not have a membership plan."
+            }, status=400)
 
-    if paused_days <= 0:
-        return JsonResponse({
-            "success": False,
-            "error": "Resume date must be after pause date."
-        }, status=400)
+        if member.plan.tenant_id != tenant.id:
+            return JsonResponse({
+                "success": False,
+                "error": "Member plan does not belong to this tenant."
+            }, status=400)
 
-    if paused_days > pause.allowed_days:
-        return JsonResponse({
-            "success": False,
-            "error": "Pause limit exceeded.",
-            "allowed_days": pause.allowed_days,
-            "requested_days": paused_days,
-            "max_monthly_days": 15
-        }, status=400)
+        actual_paused_days = (resume_date - pause.start_date).days
 
-    # Close pause
-    pause.end_date = resume_date
-    pause.paused_days = paused_days
-    pause.save()
+        # Credit only the days permitted by this pause record.
+        credited_days = min(actual_paused_days, pause.allowed_days)
 
-    # Extend membership expiry
-    if member.expiry_date:
-        member.expiry_date += timedelta(
-            days=paused_days
-        )
+        policy = get_pause_policy(member)
+        _, _, previously_used_days = get_membership_pause_usage(member)
 
-    # Calculate monthly pause usage
-    month_start = pause_start.replace(day=1)
+        if previously_used_days + credited_days > policy["max_days"]:
+            return JsonResponse({
+                "success": False,
+                "error": "Total credited pause days exceed the membership allowance.",
+                "max_pause_days": policy["max_days"],
+                "used_days": previously_used_days,
+                "requested_days": credited_days
+            }, status=400)
 
-    if pause_start.month == 12:
-        next_month = pause_start.replace(
-            year=pause_start.year + 1,
-            month=1,
-            day=1
-        )
-    else:
-        next_month = pause_start.replace(
-            month=pause_start.month + 1,
-            day=1
-        )
+        # Close the active pause record.
+        pause.end_date = resume_date
+        pause.paused_days = credited_days
+        pause.save(update_fields=["end_date", "paused_days"])
 
-    month_end = next_month - timedelta(days=1)
+        # Extend expiry by credited days only.
+        if member.expiry_date:
+            member.expiry_date += timedelta(days=credited_days)
 
-    completed_pauses = MemberPause.objects.filter(
-        tenant=tenant,
-        member=member,
-        start_date__gte=month_start,
-        start_date__lte=month_end,
-        end_date__isnull=False
-    )
+        # Recalculate usage after closing the pause.
+        _, request_count, used_days = get_membership_pause_usage(member)
 
-    used_days_this_month = sum(
-        p.paused_days
-        for p in completed_pauses
-    )
+        member.is_paused = False
+        member.pause_start_date = None
+        member.pause_expiry_date = None
+        member.used_pause_days = used_days
 
-    # Update member
-    member.is_paused = False
-    member.pause_start_date = None
-    member.pause_expiry_date = None
-    member.status = "Active"
-    member.used_pause_days = used_days_this_month
-    member.save()
+        # Recalculate status using the existing 7-day expiry rule.
+        if member.expiry_date and member.expiry_date < today:
+            days_expired = (today - member.expiry_date).days
+            member.status = "Expired" if days_expired <= 7 else "Blocked"
+        else:
+            member.status = "Active"
+
+        member.save(update_fields=[
+            "expiry_date",
+            "is_paused",
+            "pause_start_date",
+            "pause_expiry_date",
+            "used_pause_days",
+            "status"
+        ])
 
     return JsonResponse({
         "success": True,
-        "message": "Member resumed successfully",
-
-        "paused_days": paused_days,
-
-        "used_days_this_month": used_days_this_month,
-
-        "remaining_days_this_month": max(
-            0,
-            15 - used_days_this_month
+        "message": "Member resumed successfully.",
+        "actual_paused_days": actual_paused_days,
+        "credited_pause_days": credited_days,
+        "used_pause_days": used_days,
+        "remaining_pause_days": max(
+            0, policy["max_days"] - used_days
         ),
-
+        "pause_requests_used": request_count,
+        "remaining_pause_requests": max(
+            0, policy["max_requests"] - request_count
+        ),
         "new_expiry_date": (
-            member.expiry_date.strftime("%Y-%m-%d")
+            member.expiry_date.isoformat()
             if member.expiry_date else None
         ),
-
         "status": member.status,
-        "is_paused": member.is_paused,
+        "is_paused": member.is_paused
     })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def renew_member(request, member_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return JsonResponse({
+            "success": False,
+            "error": "User is not assigned to a tenant."
+        }, status=403)
+
+    if request.user.role == "STAFF":
+        return JsonResponse({
+            "success": False,
+            "error": "Staff members are not allowed to renew members."
+        }, status=403)
+
+    plan_id = request.data.get("plan")
+
+    if not plan_id:
+        return JsonResponse({
+            "success": False,
+            "error": "Plan is required."
+        }, status=400)
+
+    try:
+        plan = Plan.objects.get(
+            id=plan_id,
+            tenant=tenant
+        )
+    except (Plan.DoesNotExist, ValueError, TypeError):
+        return JsonResponse({
+            "success": False,
+            "error": "Invalid plan for this tenant."
+        }, status=400)
+
+    try:
+        duration = int(plan.duration)
+    except (ValueError, TypeError):
+        return JsonResponse({
+            "success": False,
+            "error": "Invalid plan duration."
+        }, status=400)
+
+    if duration <= 0:
+        return JsonResponse({
+            "success": False,
+            "error": "Plan duration must be greater than zero."
+        }, status=400)
+
+    today = timezone.localdate()
+
+    with transaction.atomic():
+        try:
+            member = Member.objects.select_for_update().get(
+                id=member_id,
+                tenant=tenant,
+                **get_branch_filter(request, tenant)
+            )
+        except Member.DoesNotExist:
+            return JsonResponse({
+                "success": False,
+                "error": "Member not found or access denied."
+            }, status=404)
+
+        if member.is_paused:
+            return JsonResponse({
+                "success": False,
+                "error": "Resume the member before renewing the membership."
+            }, status=400)
+
+        # Preserve the existing early-renewal behavior.
+        if member.expiry_date and member.expiry_date >= today:
+            new_expiry_date = (
+                member.expiry_date + timedelta(days=duration)
+            )
+        else:
+            new_expiry_date = today + timedelta(days=duration)
+
+        # Start a new pause-allowance cycle.
+        member.plan = plan
+        member.expiry_date = new_expiry_date
+        member.membership_start_date = today
+        member.used_pause_days = 0
+
+        # Clear pause state defensively.
+        member.is_paused = False
+        member.pause_start_date = None
+        member.pause_expiry_date = None
+        member.status = "Active"
+
+        member.save(update_fields=[
+            "plan",
+            "expiry_date",
+            "membership_start_date",
+            "used_pause_days",
+            "is_paused",
+            "pause_start_date",
+            "pause_expiry_date",
+            "status"
+        ])
+
+    policy = get_pause_policy(member)
+
+    return JsonResponse({
+        "success": True,
+        "message": "Plan renewed successfully.",
+        "member_id": member.id,
+        "member_name": member.name,
+        "plan": {
+            "id": plan.id,
+            "name": plan.name,
+            "duration": plan.duration,
+            "price": plan.price
+        },
+        "membership_start_date": member.membership_start_date.isoformat(),
+        "new_expiry_date": member.expiry_date.isoformat(),
+        "pause_policy": policy,
+        "status": member.status
+    })
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -5076,8 +5130,6 @@ def add_expense(request):
 import json
 
 from django.http import JsonResponse
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 
 @api_view(["POST"])
@@ -6285,44 +6337,624 @@ Return exactly in this format:
 
     return JsonResponse({"success": True, "diet_plan": diet_json})
 
+
+def normalize_equipment_name(name: str) -> str:
+    """
+    Normalizes equipment names to standard canonical names,
+    handling common typos, casing, and singular/plural variations.
+    E.g. 'Dumbells', 'dumbell', 'dumbbell', 'dumbbells' -> 'Dumbbells'
+         'cables', 'cable' -> 'Cables'
+    """
+    if not name:
+        return ""
+    cleaned = name.strip()
+    lower = cleaned.lower()
+    if "dumbell" in lower or "dumbbell" in lower:
+        return "Dumbbells"
+    if "cable" in lower:
+        return "Cables"
+    if "barbell" in lower or "barbel" in lower:
+        return "Barbells"
+    if "kettlebell" in lower or "kettle bell" in lower:
+        return "Kettlebells"
+    if "bench" in lower:
+        return "Bench"
+    if "resistance band" in lower or "band" in lower:
+        return "Resistance Bands"
+    return cleaned
+
+
+def is_dumbbell_equipment(name: str) -> bool:
+    if not name:
+        return False
+    lower = name.lower()
+    return "dumbbell" in lower or "dumbell" in lower
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def generate_workout(request):
+    import json
+    import logging
+    from datetime import date
+
+    logger = logging.getLogger(__name__)
+
+    # ---------------------------------------------------------
+    # TENANT
+    # ---------------------------------------------------------
     tenant = get_tenant(request)
-    member_id = request.data.get("member_id")
 
-    # SUPER_ADMIN must select a tenant
-    if request.user.role == "SUPER_ADMIN" and tenant is None:
-        return Response(
-            {
-                "success": False,
-                "error": "Please select a tenant before generating workout."
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-
-    # Other users must belong to a tenant
     if tenant is None:
         return Response(
-            {
-                "success": False,
-                "error": "User is not assigned to a tenant."
-            },
+            {"success": False, "error": "User is not assigned to a tenant."},
             status=status.HTTP_403_FORBIDDEN
         )
 
+    # ---------------------------------------------------------
+    # MEMBER ID AND EXPERIENCE LEVEL
+    # ---------------------------------------------------------
+    member_id = request.data.get("member_id")
+
     if not member_id:
+        return Response(
+            {"success": False, "error": "Member ID is required."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    experience_level = str(
+        request.data.get("experience_level", "beginner")
+    ).strip().lower()
+
+    allowed_levels = ["beginner", "intermediate", "advanced"]
+
+    if experience_level not in allowed_levels:
         return Response(
             {
                 "success": False,
-                "error": "member_id is required"
+                "error": "Choose beginner, intermediate or advanced."
             },
             status=status.HTTP_400_BAD_REQUEST
         )
 
     # ---------------------------------------------------------
-    # Get member within selected tenant + branch scope
+    # MEMBER ACCESS
     # ---------------------------------------------------------
+    member_filter = {
+        "id": member_id,
+        "tenant": tenant
+    }
+
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if not request.user.branch_id:
+            return Response(
+                {"success": False, "error": "User is not assigned to a branch."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        member_filter["branch_id"] = request.user.branch_id
+
+    try:
+        member = (
+            Member.objects
+            .select_related("branch", "plan")
+            .get(**member_filter)
+        )
+    except Member.DoesNotExist:
+        return Response(
+            {"success": False, "error": "Member not found."},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+    member_branch = member.branch
+
+    if member_branch is None:
+        return Response(
+            {"success": False, "error": "Member is not assigned to a branch."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ---------------------------------------------------------
+    # GET EQUIPMENT FOR THIS MEMBER'S BRANCH
+    # ---------------------------------------------------------
+    equipment_queryset = (
+        GymEquipment.objects
+        .filter(
+            tenant=tenant,
+            branch=member_branch,
+            is_available=True
+        )
+        .order_by("name", "weight")
+    )
+
+    equipment_list = []
+
+    for item in equipment_queryset:
+        equipment_data = {
+            "name": item.name,
+            "quantity": item.quantity
+        }
+
+        if item.weight is not None:
+            equipment_data["weight_kg"] = float(item.weight)
+
+        equipment_list.append(equipment_data)
+
+    logger.info(
+        "Workout equipment lookup: tenant=%s branch=%s equipment=%s",
+        tenant.pk,
+        member_branch.pk,
+        equipment_list
+    )
+
+    # ---------------------------------------------------------
+    # REUSE SAVED WORKOUT PLAN
+    # Reuse saved plan ONLY when member.workout_experience_level == requested experience_level.
+    # If the requested level differs, or stored level is blank/missing, generate a new plan.
+    # ---------------------------------------------------------
+    if (
+        member.workout_plan
+        and member.workout_experience_level
+        and member.workout_experience_level.strip().lower() == experience_level
+    ):
+        return Response(
+            {
+                "success": True,
+                "message": "Saved workout plan loaded successfully.",
+                "current_workout_day": member.current_workout_day,
+                "experience_level": member.workout_experience_level,
+                "available_equipment": equipment_list,
+                "workout_plan": member.workout_plan,
+                "plan_reused": True
+            },
+            status=status.HTTP_200_OK
+        )
+
+    # ---------------------------------------------------------
+    # PAUSED-MEMBERSHIP CHECK
+    # Check paused-membership logic before generating a new or replacement plan.
+    # ---------------------------------------------------------
+    auto_resume_member(member, date.today())
+    if member.is_paused:
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    "Member is currently paused. "
+                    "Resume the membership before generating a new plan."
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    # ---------------------------------------------------------
+    # FORMAT EQUIPMENT FOR AI & DETECT AVAILABLE EQUIPMENT
+    # Fix equipment-name normalization (e.g. 'Dumbells' -> 'Dumbbells')
+    # ---------------------------------------------------------
+    if equipment_list:
+        equipment_lines = []
+
+        for item in equipment_list:
+            canonical_name = normalize_equipment_name(item["name"])
+            line = (
+                f"- {canonical_name} "
+                f"(Quantity: {item['quantity']}"
+            )
+
+            if "weight_kg" in item:
+                line += f", Weight: {item['weight_kg']} kg"
+
+            line += ")"
+            equipment_lines.append(line)
+
+        equipment_text = "\n".join(equipment_lines)
+    else:
+        equipment_text = "NO GYM EQUIPMENT IS CURRENTLY AVAILABLE."
+
+    # Recognize available equipment with spelling normalization
+    has_dumbbells = any(
+        is_dumbbell_equipment(item["name"])
+        for item in equipment_list
+    )
+    has_cables = any(
+        "cable" in item["name"].lower()
+        for item in equipment_list
+    )
+    has_barbells = any(
+        "barbell" in item["name"].lower() or "barbel" in item["name"].lower()
+        for item in equipment_list
+    )
+    has_bench = any(
+        "bench" in item["name"].lower()
+        for item in equipment_list
+    )
+    has_kettlebells = any(
+        "kettlebell" in item["name"].lower() or "kettle bell" in item["name"].lower()
+        for item in equipment_list
+    )
+
+    dumbbell_weights = [
+        item["weight_kg"]
+        for item in equipment_list
+        if is_dumbbell_equipment(item["name"]) and "weight_kg" in item
+    ]
+    max_dumbbell_weight_text = f"{max(dumbbell_weights)} kg" if dumbbell_weights else "the available weight"
+
+    # ---------------------------------------------------------
+    # MEMBER DETAILS
+    # ---------------------------------------------------------
+    goal = getattr(member, "goal", None) or "General Fitness"
+    age = getattr(member, "age", None)
+    gender = getattr(member, "gender", None) or "Not specified"
+    height = getattr(member, "height", None)
+    weight = getattr(member, "weight", None)
+
+    # ---------------------------------------------------------
+    # GROQ CLIENT
+    # ---------------------------------------------------------
+    try:
+        from groq import Groq
+        client = Groq(api_key=settings.GROQ_API_KEY)
+    except Exception:
+        logger.exception("Groq client initialization failed.")
+
+        return Response(
+            {"success": False, "error": "Unable to initialize AI service."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+    # ---------------------------------------------------------
+    # AI PROMPT
+    # ---------------------------------------------------------
+    prompt = f"""
+You are a professional gym workout planner.
+
+Generate a personalized workout plan containing EXACTLY 6 days tailored specifically for a {experience_level.upper()} trainee.
+
+MEMBER DETAILS
+--------------
+Goal: {goal}
+Age: {age}
+Gender: {gender}
+Height: {height} cm
+Body weight: {weight} kg
+Experience Level: {experience_level}
+
+ACTUAL EQUIPMENT AVAILABLE IN THE MEMBER'S BRANCH
+-------------------------------------------------
+{equipment_text}
+
+MANDATORY EQUIPMENT RULES
+-------------------------
+1. Use ONLY equipment listed above, plus safe bodyweight floor/standing exercises.
+2. The equipment inventory listed above is the ABSOLUTE SOURCE OF TRUTH.
+3. NEVER assume unlisted equipment is available. NEVER generate exercises that require unavailable equipment:
+   - Barbells are STRICTLY PROHIBITED unless listed in the inventory above.
+   - Benches (flat/incline/decline bench) are STRICTLY PROHIBITED unless listed above. If no bench is listed, prescribe floor variations (e.g., Dumbbell Floor Press instead of Bench Press).
+   - Kettlebells, resistance bands, pull-up bars, smith machines, and leg machines are STRICTLY PROHIBITED unless listed above.
+4. Consider the listed quantity and exact weight:
+   - For dumbbells: Never recommend a weight heavier than the available weight ({max_dumbbell_weight_text}).
+5. If dumbbells are available, incorporate dumbbell exercises as primary resistance exercises throughout the plan.
+6. If cables are available, incorporate cable exercises (e.g., Cable Pushdowns, Cable Curls, Cable Face Pulls, Cable Rows, Cable Chest Flyes).
+7. If only dumbbells and cables are available, plan exercises using ONLY dumbbells, cables, and bodyweight floor/standing movements.
+8. If no equipment is available, generate a safe, structured bodyweight plan.
+9. Do not claim that an exercise uses a weight different from the actual equipment available.
+10. A listed quantity is inventory information, not a prescribed number of sets or repetitions.
+
+EXPERIENCE LEVEL REQUIREMENTS ({experience_level.upper()})
+---------------------------------------------------------
+The experience level must fundamentally determine exercise selection, movement complexity, variations, sets, reps, and training volume across all 6 days:
+
+- Beginner:
+  * Exercise Selection & Variations: Focus on fundamental, accessible, simple movements with high stability (e.g., standard Dumbbell Floor Press, Goblet Squats, Standing Dumbbell Bicep Curls, Dumbbell Shoulder Press, Cable Rows/Pushdowns with stable stance, standard Bodyweight Squats, Glute Bridges, Knee/Standard Push-ups). Avoid complex or high-injury-risk unilateral variations.
+  * Form Priorities: Clear emphasis on proper movement patterns, joint control, and basic mind-muscle connection.
+  * Volume & Reps: Lower, manageable volume. Typically 2 to 3 sets per exercise, 8 to 12 reps with controlled tempo, with 3 to 4 exercises per day.
+
+- Intermediate:
+  * Exercise Selection & Variations: Moderate-to-challenging movements combining compound lifts and focused isolation exercises (e.g., Dumbbell Romanian Deadlifts, Dumbbell Walking Lunges, Dumbbell Lateral Raises, Cable Crossover Flyes, Cable Lateral Raises, Cable Face Pulls).
+  * Form Priorities: Progressive overload, mind-muscle connection, and controlled eccentric tempo.
+  * Volume & Reps: Moderate volume. Typically 3 to 4 sets per exercise, 10 to 15 reps (or 8-12 for compound, 12-15 for isolation), with 4 to 5 exercises per day.
+
+- Advanced:
+  * Exercise Selection & Variations: Challenging variations, demanding compound movements, and unilateral/stability challenges (e.g., Bulgarian Split Squats, Single-leg Romanian Deadlifts, 1.5-rep or tempo Dumbbell Floor Press, Cable Cross-body Extensions, explosive or paused variations).
+  * Form Priorities: High intensity, peak contraction, advanced mechanical tension, and strict execution under fatigue.
+  * Volume & Reps: Higher training volume and intensity. Typically 4 to 5 sets per exercise, varied periodized rep ranges (e.g., 6-10 for heavy compound, 12-20 for hypertrophy/burnout), with 5 to 6 exercises per day.
+
+DUMBBELL EXAMPLES
+-----------------
+When compatible with the available equipment, consider:
+- Dumbbell Floor Press
+- Dumbbell One Arm Row
+- Dumbbell Bicep Curl
+- Dumbbell Hammer Curl
+- Dumbbell Shoulder Press
+- Dumbbell Lateral Raise
+- Dumbbell Goblet Squat
+- Dumbbell Romanian Deadlift
+- Dumbbell Lunges
+- Dumbbell Triceps Extension
+- Dumbbell Bulgarian Split Squat
+- Dumbbell Calf Raise
+
+Choose suitable exercises rather than forcing every example into the plan.
+
+WORKOUT STRUCTURE
+-----------------
+Create exactly 6 workout days.
+
+Each day must contain:
+- day: integer (1 to 6)
+- body_part: string describing muscle group(s) targeted (e.g., "Chest + Triceps", "Back + Biceps", "Legs + Core", etc.)
+- workouts: list of exercise objects
+
+Each exercise must contain:
+- workout_name: string (e.g., "Dumbbell Floor Press")
+- sets: integer (e.g., 3)
+- reps: string (e.g., "10-12")
+- duration: string (e.g., "8 min")
+
+Include suitable exercise variety, manageable volume, appropriate recovery, and exercises aligned with the member's goal and {experience_level} experience level.
+Do not prescribe a weight beyond the available equipment.
+
+Return JSON only, using this structure:
+
+{{
+  "workout_plan": [
+    {{
+      "day": 1,
+      "body_part": "Chest + Triceps",
+      "workouts": [
+        {{
+          "workout_name": "Dumbbell Floor Press",
+          "sets": 3,
+          "reps": "10-12",
+          "duration": "8 min"
+        }}
+      ]
+    }}
+  ]
+}}
+
+The example is illustrative. Return all 6 days, with suitable exercises and valid JSON. Do not include Markdown or explanations.
+"""
+
+    # ---------------------------------------------------------
+    # CALL GROQ
+    # ---------------------------------------------------------
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"You generate safe, equipment-aware workout plans for {experience_level} gym members. "
+                        "Follow the supplied equipment inventory strictly, never prescribe unavailable equipment, "
+                        f"enforce {experience_level}-appropriate exercise selection, sets, and reps, and return valid JSON only."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.2,
+            response_format={"type": "json_object"}
+        )
+
+        content = response.choices[0].message.content
+
+        if not content:
+            raise ValueError("AI returned an empty response.")
+
+        workout_data = json.loads(content)
+
+    except Exception:
+        logger.exception("Workout generation failed.")
+
+        return Response(
+            {
+                "success": False,
+                "error": "Failed to generate a valid workout plan."
+            },
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+
+    # ---------------------------------------------------------
+    # VALIDATE PLAN STRUCTURE
+    # ---------------------------------------------------------
+    workout_plan = workout_data.get("workout_plan")
+
+    if not isinstance(workout_plan, list) or len(workout_plan) != 6:
+        return Response(
+            {
+                "success": False,
+                "error": "AI must generate exactly 6 workout days."
+            },
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+
+    required_day_fields = ["day", "body_part", "workouts"]
+    required_workout_fields = [
+        "workout_name", "sets", "reps", "duration"
+    ]
+
+    for day_index, day_data in enumerate(workout_plan, start=1):
+        if not isinstance(day_data, dict):
+            return Response(
+                {"success": False, "error": f"Invalid workout day {day_index}."},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        if any(field not in day_data for field in required_day_fields):
+            return Response(
+                {
+                    "success": False,
+                    "error": f"Missing required fields in workout day {day_index}."
+                },
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        # Enforce sequential day numbering.
+        if day_data["day"] != day_index:
+            return Response(
+                {
+                    "success": False,
+                    "error": "Workout days must be numbered from 1 to 6."
+                },
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        workouts = day_data["workouts"]
+
+        if not isinstance(workouts, list) or not workouts:
+            return Response(
+                {
+                    "success": False,
+                    "error": f"Workout day {day_index} has no exercises."
+                },
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+        for workout_index, workout in enumerate(workouts, start=1):
+            if not isinstance(workout, dict):
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Invalid exercise in day {day_index}, "
+                            f"exercise {workout_index}."
+                        )
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            if any(field not in workout for field in required_workout_fields):
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Missing exercise fields in day {day_index}, "
+                            f"exercise {workout_index}."
+                        )
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+            if (
+                not isinstance(workout["workout_name"], str)
+                or not workout["workout_name"].strip()
+                or not isinstance(workout["reps"], str)
+                or not isinstance(workout["duration"], str)
+                or not isinstance(workout["sets"], int)
+                or isinstance(workout["sets"], bool)
+                or workout["sets"] < 1
+            ):
+                return Response(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Invalid exercise data in day {day_index}, "
+                            f"exercise {workout_index}."
+                        )
+                    },
+                    status=status.HTTP_502_BAD_GATEWAY
+                )
+
+    # ---------------------------------------------------------
+    # EQUIPMENT-AWARE VALIDATION
+    # ---------------------------------------------------------
+    # 1. Validate that no exercises require unavailable equipment
+    unavailable_equipment_detected = []
+    for day in workout_plan:
+        for workout in day["workouts"]:
+            w_name = workout["workout_name"].lower()
+            if not has_dumbbells and is_dumbbell_equipment(w_name):
+                unavailable_equipment_detected.append(f"Dumbbells in '{workout['workout_name']}'")
+            if not has_cables and "cable" in w_name:
+                unavailable_equipment_detected.append(f"Cables in '{workout['workout_name']}'")
+            if not has_barbells and ("barbell" in w_name or "barbel" in w_name):
+                unavailable_equipment_detected.append(f"Barbell in '{workout['workout_name']}'")
+            if not has_bench and ("bench" in w_name):
+                unavailable_equipment_detected.append(f"Bench in '{workout['workout_name']}'")
+            if not has_kettlebells and ("kettlebell" in w_name or "kettle bell" in w_name):
+                unavailable_equipment_detected.append(f"Kettlebell in '{workout['workout_name']}'")
+
+    if unavailable_equipment_detected:
+        return Response(
+            {
+                "success": False,
+                "error": (
+                    f"The AI generated exercises requiring unavailable equipment: "
+                    f"{', '.join(unavailable_equipment_detected[:3])}. "
+                    f"Please generate the plan again."
+                )
+            },
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+
+    # 2. Do not save a plan that completely ignores available dumbbells.
+    # Return an error so an incorrect plan is not silently accepted.
+    if has_dumbbells:
+        dumbbell_exercises = [
+            workout
+            for day in workout_plan
+            for workout in day["workouts"]
+            if is_dumbbell_equipment(workout["workout_name"])
+        ]
+
+        if not dumbbell_exercises:
+            return Response(
+                {
+                    "success": False,
+                    "error": (
+                        "The AI generated a plan without dumbbell "
+                        "exercises, although dumbbells are available. "
+                        "Please generate the plan again."
+                    )
+                },
+                status=status.HTTP_502_BAD_GATEWAY
+            )
+
+    # ---------------------------------------------------------
+    # SAVE WORKOUT ONLY AFTER VALIDATION
+    # ---------------------------------------------------------
+    member.workout_plan = workout_plan
+    member.workout_experience_level = experience_level
+    member.current_workout_day = 1
+
+    member.save(
+        update_fields=["workout_plan", "workout_experience_level", "current_workout_day"]
+    )
+
+    # ---------------------------------------------------------
+    # SUCCESS RESPONSE
+    # ---------------------------------------------------------
+    return Response(
+        {
+            "success": True,
+            "message": "Workout plan generated successfully.",
+            "current_workout_day": member.current_workout_day,
+            "experience_level": member.workout_experience_level,
+            "available_equipment": equipment_list,
+            "workout_plan": member.workout_plan,
+            "plan_reused": False
+        },
+        status=status.HTTP_200_OK
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def complete_workout_day(request, member_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"success": False, "error": "User is not assigned to a tenant."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
     member = get_object_or_404(
         Member,
         id=member_id,
@@ -6330,165 +6962,81 @@ def generate_workout(request):
         **get_branch_filter(request, tenant)
     )
 
-    # ---------------------------------------------------------
-    # Get available gym equipment
-    # ---------------------------------------------------------
-    equipment = GymEquipment.objects.filter(
-        tenant=tenant,
-        is_available=True
-    ).values_list("name", flat=True)
-
-    equipment_list = list(equipment)
-
-    # ---------------------------------------------------------
-    # Groq client
-    # ---------------------------------------------------------
-    client = Groq(api_key=settings.GROQ_API_KEY)
-
-    # ---------------------------------------------------------
-    # AI Prompt
-    # Existing workout generation logic preserved
-    # ---------------------------------------------------------
-    prompt = f"""
-Create a personalized 6-day gym workout plan.
-
-MEMBER:
-Age: {member.age}
-Gender: {member.gender}
-Height: {member.height}
-Weight: {member.weight}
-Goal: {member.goal}
-
-AVAILABLE GYM EQUIPMENT:
-{equipment_list}
-
-RULES:
-
-- Use only the available equipment listed above.
-- Bodyweight exercises are allowed.
-- Create exactly 6 days.
-- Each day should focus on a suitable body part.
-- Do not train the same major body part on consecutive days.
-- Make the workout suitable for the member's goal.
-- Do not include images.
-- Do not include explanations.
-- Do not include unnecessary information.
-
-For every workout provide:
-
-- workout_name
-- sets
-- reps
-- duration
-
-Return ONLY valid JSON using exactly this structure:
-
-{{
-    "workout_plan": [
-        {{
-            "day": 1,
-            "body_part": "Chest",
-            "workouts": [
-                {{
-                    "workout_name": "Bench Press",
-                    "sets": 3,
-                    "reps": "10-12",
-                    "duration": 10
-                }}
-            ]
-        }}
-    ]
-}}
-"""
-
-    try:
-        response = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.4,
-            response_format={"type": "json_object"},
-        )
-
-        content = response.choices[0].message.content
-
-        workout_data = json.loads(content)
-
-        return Response(
-            {
-                "success": True,
-                "workout_plan": workout_data["workout_plan"]
-            }
-        )
-
-    except json.JSONDecodeError:
+    # Do not allow workout completion while paused
+    if member.is_paused:
         return Response(
             {
                 "success": False,
-                "error": "AI returned invalid JSON"
+                "error": "Member is currently paused."
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_400_BAD_REQUEST
         )
 
-    except Exception as e:
+    if not member.workout_plan:
         return Response(
             {
                 "success": False,
-                "error": str(e)
+                "error": "No workout plan found."
             },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_400_BAD_REQUEST
         )
+
+    current_day = member.current_workout_day
+
+    # 6-day plan → after Day 6 start again at Day 1
+    if current_day >= 6:
+        next_day = 1
+    else:
+        next_day = current_day + 1
+
+    member.current_workout_day = next_day
+    member.save(update_fields=["current_workout_day"])
+
+    return Response({
+        "success": True,
+        "message": f"Workout Day {current_day} completed.",
+        "completed_day": current_day,
+        "next_workout_day": next_day
+    })
     
 
 # ============================================================
 # GYM EQUIPMENT
 # ============================================================
+
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def gym_equipment(request):
-
     tenant = get_tenant(request)
 
     if tenant is None:
         return Response(
-            {
-                "success": False,
-                "error": "User is not assigned to a tenant."
-            },
+            {"success": False, "error": "User is not assigned to a tenant."},
             status=status.HTTP_403_FORBIDDEN
         )
 
-    # -----------------------------------------
-    # GET - VIEW EQUIPMENT
-    # ALL ROLES
-    # -----------------------------------------
+    role = request.user.role
+    allowed_roles = ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]
 
+    if role not in allowed_roles:
+        return Response(
+            {"success": False, "error": "You do not have permission to access equipment."},
+            status=status.HTTP_403_FORBIDDEN
+        )
+
+    # GET: List equipment visible to this user.
     if request.method == "GET":
-
         equipment = (
             GymEquipment.objects
             .filter(tenant=tenant)
             .select_related("branch")
-            .order_by("name")
+            .order_by("name", "weight")
         )
 
-        # Branch Admin / Staff can only see
-        # equipment from their own branch
-        if request.user.role in [
-            "BRANCH_ADMIN",
-            "STAFF"
-        ]:
-
+        if role in ["BRANCH_ADMIN", "STAFF"]:
             if not request.user.branch_id:
                 return Response(
-                    {
-                        "success": False,
-                        "error": "User is not assigned to a branch."
-                    },
+                    {"success": False, "error": "User is not assigned to a branch."},
                     status=status.HTTP_403_FORBIDDEN
                 )
 
@@ -6496,66 +7044,29 @@ def gym_equipment(request):
                 branch_id=request.user.branch_id
             )
 
-        serializer = GymEquipmentSerializer(
-            equipment,
-            many=True
-        )
+        serializer = GymEquipmentSerializer(equipment, many=True)
 
         return Response({
             "success": True,
             "equipment": serializer.data
         })
 
-    # -----------------------------------------
-    # POST - ADD EQUIPMENT
-    # ALL ROLES
-    # -----------------------------------------
-
-    if request.user.role not in [
-        "TENANT_ADMIN",
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
-        return Response(
-            {
-                "success": False,
-                "error": "You do not have permission to add equipment."
-            },
-            status=status.HTTP_403_FORBIDDEN
-        )
-
-    # -----------------------------------------
-    # BRANCH
-    # -----------------------------------------
-
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
-
+    # POST: Add equipment.
+    if role in ["BRANCH_ADMIN", "STAFF"]:
         if not request.user.branch_id:
             return Response(
-                {
-                    "success": False,
-                    "error": "User is not assigned to a branch."
-                },
+                {"success": False, "error": "User is not assigned to a branch."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         branch = request.user.branch
 
     else:
-        # TENANT_ADMIN can select any branch
-        # belonging to their tenant
-
         branch_id = request.data.get("branch_id")
 
         if not branch_id:
             return Response(
-                {
-                    "success": False,
-                    "error": "Branch is required."
-                },
+                {"success": False, "error": "Branch is required."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -6566,69 +7077,54 @@ def gym_equipment(request):
             )
         except Branch.DoesNotExist:
             return Response(
-                {
-                    "success": False,
-                    "error": "Invalid branch."
-                },
+                {"success": False, "error": "Invalid branch."},
                 status=status.HTTP_404_NOT_FOUND
             )
 
-    # -----------------------------------------
-    # CREATE EQUIPMENT
-    # -----------------------------------------
+    serializer = GymEquipmentSerializer(data=request.data)
 
-    serializer = GymEquipmentSerializer(
-        data=request.data
-    )
-
-    if serializer.is_valid():
-
-        equipment = serializer.save(
-            tenant=tenant,
-            branch=branch
-        )
-
+    if not serializer.is_valid():
         return Response(
-            {
-                "success": True,
-                "message": "Equipment added successfully",
-                "equipment": GymEquipmentSerializer(
-                    equipment
-                ).data
-            },
-            status=status.HTTP_201_CREATED
+            {"success": False, "errors": serializer.errors},
+            status=status.HTTP_400_BAD_REQUEST
         )
+
+    equipment = serializer.save(
+        tenant=tenant,
+        branch=branch
+    )
 
     return Response(
         {
-            "success": False,
-            "errors": serializer.errors
+            "success": True,
+            "message": "Equipment added successfully.",
+            "equipment": GymEquipmentSerializer(equipment).data
         },
-        status=status.HTTP_400_BAD_REQUEST
+        status=status.HTTP_201_CREATED
     )
 
+    
 
 @api_view(["GET", "PUT", "DELETE"])
 @permission_classes([IsAuthenticated])
 def gym_equipment_detail(request, equipment_id):
-
     tenant = get_tenant(request)
 
     if tenant is None:
         return Response(
-            {
-                "success": False,
-                "error": "User is not assigned to a tenant."
-            },
+            {"success": False, "error": "User is not assigned to a tenant."},
             status=status.HTTP_403_FORBIDDEN
         )
 
-    # -----------------------------------------
-    # GET EQUIPMENT
-    # -----------------------------------------
+    role = request.user.role
+
+    if role not in ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]:
+        return Response(
+            {"success": False, "error": "You do not have permission to access equipment."},
+            status=status.HTTP_403_FORBIDDEN
+        )
 
     try:
-
         equipment = (
             GymEquipment.objects
             .select_related("branch")
@@ -6637,111 +7133,60 @@ def gym_equipment_detail(request, equipment_id):
                 tenant=tenant
             )
         )
-
     except GymEquipment.DoesNotExist:
-
         return Response(
-            {
-                "success": False,
-                "error": "Equipment not found."
-            },
+            {"success": False, "error": "Equipment not found."},
             status=status.HTTP_404_NOT_FOUND
         )
 
-    # -----------------------------------------
-    # BRANCH ACCESS
-    # BRANCH_ADMIN / STAFF
-    # -----------------------------------------
-
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
-
+    # Branch-level access control.
+    if role in ["BRANCH_ADMIN", "STAFF"]:
         if not request.user.branch_id:
             return Response(
-                {
-                    "success": False,
-                    "error": "User is not assigned to a branch."
-                },
+                {"success": False, "error": "User is not assigned to a branch."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
         if equipment.branch_id != request.user.branch_id:
             return Response(
-                {
-                    "success": False,
-                    "error": "You do not have access to this equipment."
-                },
+                {"success": False, "error": "You do not have access to this equipment."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-    # -----------------------------------------
-    # GET
-    # ALL ROLES
-    # -----------------------------------------
-
     if request.method == "GET":
-
-        serializer = GymEquipmentSerializer(
-            equipment
-        )
-
         return Response({
             "success": True,
-            "equipment": serializer.data
+            "equipment": GymEquipmentSerializer(equipment).data
         })
 
-    # -----------------------------------------
-    # PUT
-    # ALL ROLES
-    # -----------------------------------------
-
     if request.method == "PUT":
-
         serializer = GymEquipmentSerializer(
             equipment,
             data=request.data
         )
 
-        if serializer.is_valid():
-
-            # Keep equipment in its existing branch.
-            # Branch cannot be changed accidentally.
-            equipment = serializer.save(
-                tenant=tenant,
-                branch=equipment.branch
+        if not serializer.is_valid():
+            return Response(
+                {"success": False, "errors": serializer.errors},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
-            return Response({
-                "success": True,
-                "message": "Equipment updated successfully",
-                "equipment": GymEquipmentSerializer(
-                    equipment
-                ).data
-            })
-
-        return Response(
-            {
-                "success": False,
-                "errors": serializer.errors
-            },
-            status=status.HTTP_400_BAD_REQUEST
+        # Preserve the original tenant and branch.
+        equipment = serializer.save(
+            tenant=tenant,
+            branch=equipment.branch
         )
 
-    # -----------------------------------------
-    # DELETE
-    # TENANT_ADMIN / BRANCH_ADMIN ONLY
-    # -----------------------------------------
+        return Response({
+            "success": True,
+            "message": "Equipment updated successfully.",
+            "equipment": GymEquipmentSerializer(equipment).data
+        })
 
     if request.method == "DELETE":
-
-        if request.user.role == "STAFF":
+        if role == "STAFF":
             return Response(
-                {
-                    "success": False,
-                    "error": "Staff cannot delete equipment."
-                },
+                {"success": False, "error": "Staff cannot delete equipment."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
@@ -6749,9 +7194,9 @@ def gym_equipment_detail(request, equipment_id):
 
         return Response({
             "success": True,
-            "message": "Equipment deleted successfully"
+            "message": "Equipment deleted successfully."
         })
-    
+        
 
 from .models import Member, Income, Expense, Sales_product, Payment, Plan
 from .tenant_utils import get_tenant, get_branch_filter
@@ -6770,10 +7215,6 @@ from django.conf import settings
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
-from rest_framework import status
 from groq import Groq
 from .serializers import GymEquipmentSerializer
 from .tenant_utils import get_tenant, get_branch_filter
@@ -6968,39 +7409,785 @@ def validate_member(request, member_id):
         )
 
 
-# @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
-# def expenses(request):
-#     tenant = get_tenant(request)
+from .essl_service import get_all_employee_details
 
-#     qs = Expense.objects.filter(
-#         tenant=tenant
-#     ).order_by(
-#         "-date",
-#         "-id"
-#     )
 
-#     data = [
-#         {
-#             "id": e.id,
-#             "title": e.title,
-#             "name": e.name,
-#             "phone": e.phone,
-#             "category": e.category,
-#             "description": e.description,
-#             "amount": str(e.amount),
-#             "payment_method": e.payment_method,
-#             "date": e.date.strftime("%Y-%m-%d"),
-#             "type": (
-#                 "Salary"
-#                 if e.is_system_generated
-#                 else "Additional"
-#             ),
-#         }
-#         for e in qs
-#     ]
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def essl_test_employees(request):
+    try:
+        result = get_all_employee_details()
+        return Response(result, status=status.HTTP_200_OK)
 
-#     return JsonResponse(
-#         data,
-#         safe=False
-#     )
+    except Exception:
+        # Do not expose credentials or internal server errors.
+        return Response(
+            {
+                "error": (
+                    "Unable to retrieve employees from eSSL. "
+                    "Check server logs for details."
+                )
+            },
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+
+
+from .essl_service import sync_essl_employees
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def essl_sync_employees(request):
+    user = request.user
+    tenant = getattr(user, "tenant", None)
+
+    if tenant is None:
+        return Response(
+            {"error": "Your account is not associated with a tenant."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        result = sync_essl_employees(tenant=tenant)
+        return Response(result, status=status.HTTP_200_OK)
+
+    except Exception:
+        return Response(
+            {"error": "eSSL synchronization failed. Check the server logs."},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+
+from .models import BiometricEmployeeMapping, Member, Staffs,Attendance,BiometricDevice
+from .serializers import BiometricEmployeeMappingSerializer
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def list_biometric_mappings(request):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"error": "User is not assigned to a tenant"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    mappings = (
+        BiometricEmployeeMapping.objects
+        .filter(tenant=tenant)
+        .select_related("member", "staff")
+        .order_by("essl_employee_code")
+    )
+
+    search = request.query_params.get("search", "").strip()
+
+    if search:
+        from django.db.models import Q
+
+        mappings = mappings.filter(
+            Q(essl_employee_code__icontains=search)
+            | Q(essl_employee_name__icontains=search)
+        )
+
+    serializer = BiometricEmployeeMappingSerializer(
+        mappings,
+        many=True,
+    )
+
+    return Response(serializer.data)
+
+import logging
+
+from django.db import IntegrityError, transaction
+logger = logging.getLogger(__name__)
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def link_biometric_employee(request, mapping_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"error": "User is not assigned to a tenant"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    member_id = request.data.get("member")
+    staff_id = request.data.get("staff")
+
+    # Exactly one non-empty ID must be supplied.
+    if bool(member_id) == bool(staff_id):
+        return Response(
+            {"error": "Provide either a member ID or a staff ID, not both."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    mapping = BiometricEmployeeMapping.objects.filter(
+        id=mapping_id,
+        tenant=tenant,
+    ).first()
+
+    if mapping is None:
+        return Response(
+            {"error": "Biometric mapping not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if member_id:
+        person = Member.objects.filter(
+            id=member_id,
+            tenant=tenant,
+        ).first()
+
+        if person is None:
+            return Response(
+                {"error": "Member not found in this tenant"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        mapping.member = person
+        mapping.staff = None
+
+    else:
+        person = Staffs.objects.filter(
+            id=staff_id,
+            tenant=tenant,
+        ).first()
+
+        if person is None:
+            return Response(
+                {"error": "Staff not found in this tenant"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        mapping.staff = person
+        mapping.member = None
+
+    try:
+        with transaction.atomic():
+            mapping.save()
+
+    except IntegrityError:
+        logger.exception(
+            "Failed to link biometric mapping %s",
+            mapping_id,
+        )
+        return Response(
+            {
+                "error": (
+                    "Could not save the biometric mapping. "
+                    "Check the database constraints and existing records."
+                )
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    return Response(
+        BiometricEmployeeMappingSerializer(mapping).data,
+        status=status.HTTP_200_OK,
+    )
+
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def unlink_biometric_employee(request, mapping_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"error": "User is not assigned to a tenant"},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    mapping = BiometricEmployeeMapping.objects.filter(
+        id=mapping_id,
+        tenant=tenant,
+    ).first()
+
+    if mapping is None:
+        return Response(
+            {"error": "Biometric mapping not found"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    mapping.member = None
+    mapping.staff = None
+    mapping.save(update_fields=["member", "staff"])
+
+    return Response(
+        BiometricEmployeeMappingSerializer(mapping).data,
+        status=status.HTTP_200_OK,
+    )
+
+import logging
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
+from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
+
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from .models import Attendance, BiometricEmployeeMapping
+from .essl_service import call_essl
+
+# KEEP your existing get_tenant import here.
+# Example:
+# from .utils import get_tenant
+
+logger = logging.getLogger(__name__)
+
+INDIA_TIMEZONE = ZoneInfo("Asia/Kolkata")
+UTC_TIMEZONE = ZoneInfo("UTC")
+
+
+def parse_essl_attendance_logs(raw_response):
+    """
+    Parse eSSL attendance logs.
+
+    eSSL sends timestamps in Indian local time.
+    Interpret the raw time as IST before saving it.
+    Django stores aware datetimes in UTC when USE_TZ=True.
+    """
+    if raw_response is None:
+        return []
+
+    if isinstance(raw_response, list):
+        return raw_response
+
+    raw_text = str(raw_response).strip()
+
+    if not raw_text:
+        return []
+
+    # Support XML SOAP responses.
+    if raw_text.startswith("<"):
+        try:
+            root = ET.fromstring(raw_text)
+
+            raw_text = " ".join(
+                element.text.strip()
+                for element in root.iter()
+                if element.text and element.text.strip()
+            )
+
+        except ET.ParseError:
+            logger.exception("Unable to parse eSSL SOAP XML.")
+            return []
+
+    parsed_logs = []
+
+    for line in raw_text.replace("\r", "").split(";"):
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parts = [part.strip() for part in line.split(",")]
+
+        if len(parts) < 5:
+            logger.warning("Skipping malformed eSSL record: %s", line)
+            continue
+
+        timestamp_text, employee_code, device_name, location, punch_type = (
+            parts[:5]
+        )
+
+        try:
+            naive_time = datetime.strptime(
+                timestamp_text,
+                "%Y-%m-%d %H:%M:%S",
+            )
+
+            # IMPORTANT: eSSL device time is interpreted as IST.
+            punch_time = timezone.make_aware(
+                naive_time,
+                timezone=INDIA_TIMEZONE,
+            )
+
+        except ValueError:
+            logger.warning(
+                "Invalid eSSL timestamp: %s",
+                timestamp_text,
+            )
+            continue
+
+        if not employee_code:
+            continue
+
+        logger.info("eSSL raw timestamp: %s", timestamp_text)
+        logger.info("Parsed IST timestamp: %s", punch_time.isoformat())
+        logger.info(
+            "Parsed UTC timestamp: %s",
+            punch_time.astimezone(UTC_TIMEZONE).isoformat(),
+        )
+
+        parsed_logs.append({
+            "employee_code": employee_code,
+            "punch_time": punch_time,
+            "punch_type": punch_type or "INOUT",
+            "raw_data": {
+                "device_name": device_name,
+                "location": location,
+                "original_record": line,
+            },
+        })
+
+    return parsed_logs
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def sync_essl_attendance(request):
+    """Sync attendance logs for all active attendance devices."""
+
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"detail": "Unable to determine the current tenant."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    date_value = request.data.get("date") or request.data.get("log_date")
+
+    if date_value:
+        try:
+            log_date = datetime.strptime(
+                str(date_value), "%Y-%m-%d"
+            ).date()
+        except ValueError:
+            return Response(
+                {"detail": "Invalid date. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+    else:
+        log_date = timezone.localdate()
+
+    username = getattr(settings, "ESSL_USERNAME", "")
+    password = getattr(settings, "ESSL_PASSWORD", "")
+
+    if not username or not password:
+        return Response(
+            {"detail": "eSSL credentials are not configured."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    devices = list(
+        BiometricDevice.objects.filter(
+            tenant=tenant,
+            is_active=True,
+            is_attendance_device=True,
+        ).order_by("id")
+    )
+
+    if not devices:
+        return Response(
+            {
+                "detail": (
+                    "No active attendance devices are registered "
+                    "for this tenant."
+                )
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Group devices by location. The SOAP API accepts Location,
+    # not the device serial number, in the current integration.
+    devices_by_location = {}
+
+    for device in devices:
+        location = (
+            device.location
+            or request.data.get("location")
+            or getattr(settings, "ESSL_LOCATION", "TCR")
+        ).strip()
+
+        devices_by_location.setdefault(location, []).append(device)
+
+    results = []
+    total_received = 0
+    total_created = 0
+    total_updated = 0
+    total_skipped = 0
+    failed_locations = []
+
+    for location, location_devices in devices_by_location.items():
+        try:
+            raw_response = call_essl(
+                "GetDeviceLogs",
+                {
+                    "UserName": username,
+                    "Password": password,
+                    "Location": location,
+                    "LogDate": log_date.strftime("%Y-%m-%d"),
+                },
+            )
+
+            parsed_logs = parse_essl_attendance_logs(raw_response)
+
+            device_by_name = {
+                device.name.strip().casefold(): device
+                for device in location_devices
+                if device.name.strip()
+            }
+
+            created_count = 0
+            updated_count = 0
+            skipped_count = 0
+            matched_devices = set()
+
+            with transaction.atomic():
+                for log in parsed_logs:
+                    employee_code = str(
+                        log.get("employee_code", "")
+                    ).strip()
+
+                    punch_time = log.get("punch_time")
+                    raw_data = log.get("raw_data") or {}
+
+                    if not employee_code or not punch_time:
+                        skipped_count += 1
+                        continue
+
+                    # The raw log contains the device name, e.g. uFace302.
+                    log_device_name = str(
+                        raw_data.get("device_name", "")
+                    ).strip().casefold()
+
+                    device = device_by_name.get(log_device_name)
+
+                    # Do not guess which device produced a punch.
+                    if device is None:
+                        skipped_count += 1
+                        logger.warning(
+                            "Cannot identify attendance device: "
+                            "tenant=%s location=%s device_name=%s",
+                            tenant.pk,
+                            location,
+                            log_device_name,
+                        )
+                        continue
+
+                    matched_devices.add(device.pk)
+
+                    mapping = (
+                        BiometricEmployeeMapping.objects.filter(
+                            tenant=tenant,
+                            essl_employee_code=employee_code,
+                            is_active=True,
+                        ).first()
+                    )
+
+                    original_record = raw_data.get("original_record")
+
+                    attendance = Attendance.objects.filter(
+                        tenant=tenant,
+                        essl_employee_code=employee_code,
+                        punch_time=punch_time,
+                    ).first()
+
+                    if attendance is None and original_record:
+                        attendance = (
+                            Attendance.objects.filter(
+                                tenant=tenant,
+                                essl_employee_code=employee_code,
+                                raw_data__original_record=original_record,
+                            )
+                            .order_by("-punch_time")
+                            .first()
+                        )
+
+                        if attendance is not None:
+                            duplicate_exists = Attendance.objects.filter(
+                                tenant=tenant,
+                                essl_employee_code=employee_code,
+                                punch_time=punch_time,
+                            ).exclude(pk=attendance.pk).exists()
+
+                            if duplicate_exists:
+                                skipped_count += 1
+                                continue
+
+                    if attendance is not None:
+                        attendance.punch_time = punch_time
+                        attendance.biometric_mapping = mapping
+                        attendance.punch_type = log.get(
+                            "punch_type", "INOUT"
+                        )
+                        attendance.raw_data = raw_data
+                        attendance.device = device
+
+                        attendance.save(
+                            update_fields=[
+                                "punch_time",
+                                "biometric_mapping",
+                                "punch_type",
+                                "raw_data",
+                                "device",
+                            ]
+                        )
+                        updated_count += 1
+
+                    else:
+                        Attendance.objects.create(
+                            tenant=tenant,
+                            essl_employee_code=employee_code,
+                            punch_time=punch_time,
+                            biometric_mapping=mapping,
+                            device=device,
+                            punch_type=log.get("punch_type", "INOUT"),
+                            raw_data=raw_data,
+                        )
+                        created_count += 1
+
+                # Update only devices whose logs were processed successfully.
+                for device in location_devices:
+                    if device.pk in matched_devices:
+                        device.last_synced_at = timezone.now()
+                        device.save(update_fields=["last_synced_at"])
+
+            total_received += len(parsed_logs)
+            total_created += created_count
+            total_updated += updated_count
+            total_skipped += skipped_count
+
+            for device in location_devices:
+                results.append({
+                    "device_id": device.pk,
+                    "device_name": device.name,
+                    "serial_number": device.serial_number,
+                    "location": location,
+                    "status": (
+                        "success"
+                        if device.pk in matched_devices
+                        else "no_matching_logs"
+                    ),
+                    "received": len(parsed_logs),
+                    "created": created_count,
+                    "updated": updated_count,
+                    "skipped": skipped_count,
+                })
+
+        except Exception as exc:
+            logger.exception(
+                "Attendance sync failed for location %s, tenant %s",
+                location,
+                tenant.pk,
+            )
+
+            failed_locations.append(location)
+
+            for device in location_devices:
+                results.append({
+                    "device_id": device.pk,
+                    "device_name": device.name,
+                    "serial_number": device.serial_number,
+                    "location": location,
+                    "status": "failed",
+                    "error": str(exc),
+                })
+
+    has_failures = bool(failed_locations)
+
+    response_data = {
+        "message": (
+            "Attendance sync completed with errors."
+            if has_failures
+            else "Attendance sync completed."
+        ),
+        "tenant_id": tenant.pk,
+        "log_date": log_date.isoformat(),
+        "received": total_received,
+        "created": total_created,
+        "updated": total_updated,
+        "skipped": total_skipped,
+        "failed_locations": failed_locations,
+        "devices": results,
+    }
+
+    return Response(
+        response_data,
+        status=(
+            status.HTTP_502_BAD_GATEWAY
+            if has_failures
+            else status.HTTP_200_OK
+        ),
+    )
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def list_attendance(request):
+    """Return attendance records belonging to the current tenant."""
+
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {"detail": "Unable to determine the current tenant."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    queryset = Attendance.objects.filter(
+        tenant=tenant
+    ).select_related(
+        "biometric_mapping",
+        "biometric_mapping__member",
+        "biometric_mapping__staff",
+    )
+
+    employee_code = request.query_params.get(
+        "employee_code", ""
+    ).strip()
+
+    if employee_code:
+        queryset = queryset.filter(
+            essl_employee_code=employee_code
+        )
+
+    month_value = request.query_params.get(
+        "month", ""
+    ).strip()
+
+    if month_value:
+        try:
+            selected_month = datetime.strptime(
+                month_value,
+                "%Y-%m",
+            ).date()
+
+        except ValueError:
+            return Response(
+                {"detail": "Invalid month. Use YYYY-MM."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        start_of_month = timezone.make_aware(
+            datetime(
+                selected_month.year,
+                selected_month.month,
+                1,
+            ),
+            timezone=INDIA_TIMEZONE,
+        )
+
+        if selected_month.month == 12:
+            next_month_date = datetime(
+                selected_month.year + 1,
+                1,
+                1,
+            )
+        else:
+            next_month_date = datetime(
+                selected_month.year,
+                selected_month.month + 1,
+                1,
+            )
+
+        start_of_next_month = timezone.make_aware(
+            next_month_date,
+            timezone=INDIA_TIMEZONE,
+        )
+
+        queryset = queryset.filter(
+            punch_time__gte=start_of_month,
+            punch_time__lt=start_of_next_month,
+        )
+
+    date_value = request.query_params.get(
+        "date", ""
+    ).strip()
+
+    if date_value:
+        try:
+            selected_date = datetime.strptime(
+                date_value,
+                "%Y-%m-%d",
+            ).date()
+
+        except ValueError:
+            return Response(
+                {"detail": "Invalid date. Use YYYY-MM-DD."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        start_of_day = timezone.make_aware(
+            datetime.combine(
+                selected_date,
+                datetime.min.time(),
+            ),
+            timezone=INDIA_TIMEZONE,
+        )
+
+        start_of_next_day = timezone.make_aware(
+            datetime.combine(
+                selected_date + timedelta(days=1),
+                datetime.min.time(),
+            ),
+            timezone=INDIA_TIMEZONE,
+        )
+
+        queryset = queryset.filter(
+            punch_time__gte=start_of_day,
+            punch_time__lt=start_of_next_day,
+        )
+
+    search = request.query_params.get(
+        "search", ""
+    ).strip()
+
+    if search:
+        queryset = queryset.filter(
+            Q(essl_employee_code__icontains=search)
+            | Q(
+                biometric_mapping__essl_employee_name__icontains=search
+            )
+        )
+
+    records = queryset.order_by("-punch_time")
+
+    results = []
+
+    for record in records:
+        mapping = record.biometric_mapping
+
+        results.append({
+            "id": record.pk,
+            "employee_code": record.essl_employee_code,
+            "employee_name": (
+                mapping.essl_employee_name
+                if mapping else None
+            ),
+            "member_id": (
+                mapping.member_id
+                if mapping and mapping.member_id
+                else None
+            ),
+            "staff_id": (
+                mapping.staff_id
+                if mapping and mapping.staff_id
+                else None
+            ),
+            "punch_time": (
+                record.punch_time.isoformat()
+                if record.punch_time
+                else None
+            ),
+            "punch_type": record.punch_type,
+            "raw_data": record.raw_data or {},
+        })
+
+    return Response(
+        {
+            "count": len(results),
+            "results": results,
+        },
+        status=status.HTTP_200_OK,
+    )

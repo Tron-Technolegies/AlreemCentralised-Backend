@@ -51,27 +51,9 @@ class CustomUser(AbstractUser):
         ("BRANCH_ADMIN", "Branch Admin"),
         ("STAFF", "Staff"),
     ]
-    tenant = models.ForeignKey(
-        Tenant,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="users"
-    )
-
-    branch = models.ForeignKey(
-        Branch,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="users"
-    )
-
-    role = models.CharField(
-        max_length=20,
-        choices=ROLE_CHOICES,
-        default="STAFF"
-    )
+    tenant = models.ForeignKey(Tenant,on_delete=models.CASCADE,null=True,blank=True,related_name="users")
+    branch = models.ForeignKey(Branch,on_delete=models.SET_NULL,null=True,blank=True,related_name="users")
+    role = models.CharField(max_length=20,choices=ROLE_CHOICES,default="STAFF")
 
     def __str__(self):
         return self.username
@@ -116,14 +98,61 @@ class Member(TenantBaseModel):
     pause_start_date = models.DateField(blank=True, null=True)
     used_pause_days = models.PositiveIntegerField(default=0)
     pause_expiry_date = models.DateField(blank=True,null=True)
+    current_workout_day = models.PositiveIntegerField(default=1)
+    workout_plan = models.JSONField(default=list, blank=True)
+    workout_experience_level = models.CharField(
+    max_length=20,
+    choices=[
+        ("beginner", "Beginner"),
+        ("intermediate", "Intermediate"),
+        ("advanced", "Advanced"),
+    ],blank=True,default="",)
+    membership_start_date = models.DateField(null=True,blank=True,help_text="Start date of the current membership cycle")
+
+from django.db import models
+from django.core.exceptions import ValidationError
+
 
 class MemberPause(TenantBaseModel):
-    member = models.ForeignKey(Member,on_delete=models.CASCADE,related_name="pause_history")
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.CASCADE,
+        related_name="pause_history",
+    )
     start_date = models.DateField()
-    end_date = models.DateField(null=True,blank=True)
+    end_date = models.DateField(null=True, blank=True)
     allowed_days = models.PositiveIntegerField(default=0)
     paused_days = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["member"],
+                condition=models.Q(end_date__isnull=True),
+                name="unique_active_pause_per_member",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+
+        if self.end_date and self.end_date <= self.start_date:
+            raise ValidationError({
+                "end_date": "End date must be after start date."
+            })
+
+        if self.paused_days > self.allowed_days:
+            raise ValidationError({
+                "paused_days": "Paused days cannot exceed allowed days."
+            })
+
+        if self.tenant_id and self.member_id:
+            if self.member.tenant_id != self.tenant_id:
+                raise ValidationError({
+                    "tenant": "Pause and member must belong to the same tenant."
+                })
+
     def __str__(self):
         return f"{self.member.name} - {self.start_date}"
 
@@ -140,60 +169,144 @@ class Staffs(TenantBaseModel):
         ("Active", "Active"),
         ("Inactive", "Inactive"),
     ]
-
     name = models.CharField(max_length=100, blank=True, null=True)
-
-    role = models.CharField(
-        max_length=100,
-        blank=True,
-        null=True
-    )
-
-    specialization = models.CharField(
-        max_length=255,
-        blank=True,
-        null=True
-    )
-
-    phone = models.CharField(
-        max_length=15,
-        blank=True,
-        null=True
-    )
-
-    experience = models.CharField(
-        max_length=50,
-        blank=True,
-        null=True
-    )
-
-    joining_date = models.DateField(
-        blank=True,
-        null=True
-    )
-
-    salary = models.DecimalField(
-        max_digits=10,
-        decimal_places=2,
-        default=0
-    )
-
-    status = models.CharField(
-        max_length=10,
-        choices=STATUS_CHOICES,
-        default="Active"
-    )
-
-    branch = models.ForeignKey(
-        Branch,
-        on_delete=models.PROTECT,
-        related_name="staff_members",
-        null=True,
-        blank=True
-    )
+    role = models.CharField(max_length=100,blank=True,null=True)
+    specialization = models.CharField(max_length=255,blank=True,null=True)
+    phone = models.CharField(max_length=15,blank=True,null=True)
+    experience = models.CharField(max_length=50,blank=True,null=True)
+    joining_date = models.DateField(blank=True,null=True)
+    salary = models.DecimalField(max_digits=10,decimal_places=2,default=0)
+    status = models.CharField(max_length=10,choices=STATUS_CHOICES,default="Active")
+    branch = models.ForeignKey(Branch,on_delete=models.PROTECT,related_name="staff_members",null=True,blank=True)
 
     def __str__(self):
         return self.name or "Staff"
+    
+
+
+class BiometricEmployeeMapping(TenantBaseModel):
+    essl_employee_code = models.CharField(max_length=100)
+    essl_employee_name = models.CharField(
+        max_length=255, blank=True, default=""
+    )
+
+    member = models.ForeignKey(
+        "adminapp.Member",
+        on_delete=models.PROTECT,
+        related_name="biometric_mappings",
+        null=True,
+        blank=True,
+    )
+
+    staff = models.ForeignKey(
+        "adminapp.Staffs",
+        on_delete=models.PROTECT,
+        related_name="biometric_mappings",
+        null=True,
+        blank=True,
+    )
+
+    is_active = models.BooleanField(default=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(member__isnull=True)
+                    | models.Q(staff__isnull=True)
+                ),
+                name="biometric_mapping_one_person",
+            ),
+            models.UniqueConstraint(
+                fields=["tenant", "essl_employee_code"],
+                name="unique_essl_code_per_tenant",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.essl_employee_code} - {self.essl_employee_name}"
+
+
+class Attendance(TenantBaseModel):
+    biometric_mapping = models.ForeignKey(
+        "BiometricEmployeeMapping",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="attendance_records",
+    )
+    device = models.ForeignKey(
+    "adminapp.BiometricDevice",
+    on_delete=models.SET_NULL,
+    null=True,
+    blank=True,
+    related_name="attendance_records",
+    )
+    essl_employee_code = models.CharField(max_length=100)
+
+    punch_time = models.DateTimeField()
+
+    punch_type = models.CharField(
+        max_length=30,
+        blank=True,
+        default="",
+    )
+
+    raw_data = models.JSONField(
+        default=dict,
+        blank=True,
+    )
+
+    class Meta:
+        ordering = ["-punch_time"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "tenant",
+                    "essl_employee_code",
+                    "punch_time",
+                ],
+                name="unique_tenant_employee_punch_time",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "punch_time"],
+                name="att_tenant_punch_idx",
+            ),
+            models.Index(
+                fields=["tenant", "essl_employee_code", "punch_time"],
+                name="att_tenant_emp_time_idx",
+            ),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.essl_employee_code} - "
+            f"{self.punch_time}"
+        )
+
+class BiometricDevice(TenantBaseModel):
+    name = models.CharField(max_length=150)
+    serial_number = models.CharField(max_length=150)
+    location = models.CharField(max_length=150, blank=True, default="")
+    time_zone = models.CharField(max_length=20, default="330")
+    is_attendance_device = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "serial_number"],
+                name="unique_biometric_serial_per_tenant",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.serial_number})"
+
     
 class Payment(TenantBaseModel):
     member = models.ForeignKey(Member,on_delete=models.CASCADE,null=True,blank=True)
@@ -328,8 +441,18 @@ class Enquiry(TenantBaseModel):
 
 class GymEquipment(TenantBaseModel):
     name = models.CharField(max_length=255)
+
     quantity = models.PositiveIntegerField(default=1)
+
+    weight = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True
+    )
+
     is_available = models.BooleanField(default=True)
+
     branch = models.ForeignKey(
         "Branch",
         on_delete=models.CASCADE,
@@ -337,7 +460,12 @@ class GymEquipment(TenantBaseModel):
         null=True,
         blank=True,
     )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
+        if self.weight:
+            return f"{self.name} - {self.weight} kg"
         return self.name
+
+
