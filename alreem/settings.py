@@ -36,6 +36,7 @@ ALLOWED_HOSTS = [
     "alreemcentralised-backend.onrender.com",
     "localhost",
     "127.0.0.1",
+    "43.204.238.244",
 ]
 
 
