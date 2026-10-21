@@ -240,7 +240,7 @@ class IsSuperAdmin(BasePermission):
 
 
 # ============================================================
-# LOGIN — now embeds tenant/role/branch in the token + response
+# LOGIN —
 # ============================================================
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -412,10 +412,58 @@ def create_member(request):
                 status=400
             )
 
-        if not branch_id:
+        # if not branch_id:
+        #     return JsonResponse(
+        #         {"error": "Branch is required"},
+        #         status=400
+        #     )
+
+
+        # -------------------------------------------------
+        # BRANCH VALIDATION
+        # -------------------------------------------------
+        if request.user.role == "TENANT_ADMIN":
+            # Tenant Admin must select a branch.
+            if not branch_id:
+                return JsonResponse(
+                    {"error": "Branch is required"},
+                    status=400
+                )
+
+            branch = Branch.objects.filter(
+                id=branch_id,
+                tenant=tenant
+            ).first()
+
+            if not branch:
+                return JsonResponse(
+                    {"error": "Invalid branch selected"},
+                    status=400
+                )
+
+        elif request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+            # Use the branch assigned to the logged-in user.
+            if not request.user.branch_id:
+                return JsonResponse(
+                    {"error": "Your account is not assigned to a branch"},
+                    status=403
+                )
+
+            branch = Branch.objects.filter(
+                id=request.user.branch_id,
+                tenant=tenant
+            ).first()
+
+            if not branch:
+                return JsonResponse(
+                    {"error": "Invalid branch assignment"},
+                    status=403
+                )
+
+        else:
             return JsonResponse(
-                {"error": "Branch is required"},
-                status=400
+                {"error": "Permission denied"},
+                status=403
             )
 
         if not join_date_str:
@@ -436,10 +484,11 @@ def create_member(request):
 
         if Member.objects.filter(
             tenant=tenant,
+            branch=branch,
             phone=phone
         ).exists():
             return JsonResponse(
-                {"error": "Mobile number already exists"},
+                {"error": "Mobile number already exists in this branch"},
                 status=400
             )
 
@@ -449,10 +498,11 @@ def create_member(request):
 
         if email and Member.objects.filter(
             tenant=tenant,
-            email=email
+            branch=branch,
+            email__iexact=email
         ).exists():
             return JsonResponse(
-                {"error": "Email already exists"},
+                {"error": "Email already exists in this branch"},
                 status=400
             )
 
@@ -471,45 +521,58 @@ def create_member(request):
                 status=400
             )
 
+
         # -------------------------------------------------
-        # Branch validation
+        # BRANCH VALIDATION
         # -------------------------------------------------
+        # if request.user.role == "TENANT_ADMIN":
+        #     # Only Tenant Admin selects a branch from the dropdown.
+        #     if not branch_id:
+        #         return JsonResponse(
+        #             {"error": "Branch is required"},
+        #             status=400
+        #         )
 
-        # Branch Admin and Staff MUST use their own branch.
-        if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        #     branch = Branch.objects.filter(
+        #         id=branch_id,
+        #         tenant=tenant
+        #     ).first()
 
-            if not request.user.branch_id:
-                return JsonResponse(
-                    {"error": "User is not assigned to a branch"},
-                    status=403
-                )
+        #     if not branch:
+        #         return JsonResponse(
+        #             {"error": "Invalid branch selected"},
+        #             status=400
+        #         )
 
-            branch = Branch.objects.filter(
-                id=request.user.branch_id,
-                tenant=tenant
-            ).first()
+        # elif request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        #     # Automatically use the user's assigned branch.
+        #     if not request.user.branch_id:
+        #         return JsonResponse(
+        #             {
+        #                 "error": (
+        #                     "Your account is not assigned to a branch. "
+        #                     "Please contact your administrator."
+        #                 )
+        #             },
+        #             status=403
+        #         )
 
-            if not branch:
-                return JsonResponse(
-                    {"error": "Invalid branch assignment"},
-                    status=403
-                )
+        #     branch = Branch.objects.filter(
+        #         id=request.user.branch_id,
+        #         tenant=tenant
+        #     ).first()
 
-            # Ignore any branch_id sent by frontend.
-            branch_id = request.user.branch_id
+        #     if not branch:
+        #         return JsonResponse(
+        #             {"error": "Invalid branch assignment"},
+        #             status=403
+        #         )
 
-        else:
-            # TENANT_ADMIN
-            try:
-                branch = Branch.objects.get(
-                    id=branch_id,
-                    tenant=tenant
-                )
-            except Branch.DoesNotExist:
-                return JsonResponse(
-                    {"error": "Invalid Branch selected"},
-                    status=400
-                )
+        # else:
+        #     return JsonResponse(
+        #         {"error": "Permission denied"},
+        #         status=403
+        #     )
 
         # -------------------------------------------------
         # Join date
@@ -1702,261 +1765,373 @@ def delete_plan(request, plan_id):
     })
 
 
+from datetime import date, datetime, timedelta
+from django.db import transaction, IntegrityError
+from django.http import JsonResponse
+
+
+User = get_user_model()
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_branch(request):
+    """Create a branch and its Branch Admin account atomically."""
+
     tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
-            status=403
+            status=403,
         )
 
-    # Only Tenant Admin can create branches
     if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
             {"error": "Only Tenant Admin can create branches"},
-            status=403
+            status=403,
         )
 
-    phone = request.POST.get("phone")
-    capacity = request.POST.get("capacity")
+    data = request.data
 
-    if not phone or not phone.isdigit() or len(phone) != 10:
+    name = str(data.get("name", "")).strip()
+    location = str(data.get("location", "")).strip()
+    manager_name = str(data.get("manager_name", "")).strip()
+    phone = str(data.get("phone", "")).strip()
+    capacity_value = data.get("capacity")
+    username = str(data.get("admin_username", "")).strip()
+    password = data.get("admin_password", "")
+
+    if not name:
+        return JsonResponse({"error": "Branch name is required"}, status=400)
+
+    if not phone.isdigit() or len(phone) != 10:
         return JsonResponse(
             {"error": "Enter a valid 10-digit mobile number"},
-            status=400
+            status=400,
         )
 
-    Branch.objects.create(
-        tenant=tenant,
-        name=request.POST.get("name"),
-        location=request.POST.get("location"),
-        manager_name=request.POST.get("manager_name"),
-        phone=phone,
-        capacity=capacity,
-    )
+    try:
+        capacity = int(capacity_value)
+        if capacity <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return JsonResponse(
+            {"error": "Capacity must be a positive whole number"},
+            status=400,
+        )
+
+    if not username:
+        return JsonResponse(
+            {"error": "Branch admin username is required"},
+            status=400,
+        )
+
+    if not isinstance(password, str) or len(password) < 8:
+        return JsonResponse(
+            {"error": "Branch admin password must be at least 8 characters"},
+            status=400,
+        )
+
+    if User.objects.filter(username__iexact=username).exists():
+        return JsonResponse(
+            {"error": "This username is already taken"},
+            status=400,
+        )
+
+    try:
+        with transaction.atomic():
+            branch = Branch.objects.create(
+                tenant=tenant,
+                name=name,
+                location=location,
+                manager_name=manager_name,
+                phone=phone,
+                capacity=capacity,
+            )
+
+            admin_user = User.objects.create_user(
+                username=username,
+                password=password,
+                role="BRANCH_ADMIN",
+                tenant=tenant,
+                branch=branch,
+            )
+
+    except IntegrityError:
+        return JsonResponse(
+            {
+                "error": (
+                    "Unable to create the branch or admin account. "
+                    "Check for duplicate values and try again."
+                )
+            },
+            status=400,
+        )
 
     return JsonResponse(
-        {"message": "Branch created successfully"},
-        status=201
+        {
+            "message": "Branch and Branch Admin account created successfully",
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+                "location": branch.location,
+                "manager_name": branch.manager_name,
+                "phone": branch.phone,
+                "capacity": branch.capacity,
+            },
+            "admin": {
+                "id": admin_user.id,
+                "username": admin_user.username,
+                "role": admin_user.role,
+            },
+        },
+        status=201,
     )
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branches(request):
+    """List branches belonging to the logged-in user's tenant."""
+
     tenant = get_tenant(request)
-    user = request.user
 
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
-            status=403
+            status=403,
         )
 
-    qs = Branch.objects.filter(tenant=tenant)
+    branches = Branch.objects.filter(tenant=tenant)
 
-    # Branch Admin and Staff can only view their own branch
-    if user.role in ["BRANCH_ADMIN", "STAFF"]:
-        if not user.branch_id:
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if request.user.branch_id is None:
             return JsonResponse(
-                {"error": "User is not assigned to a branch"},
-                status=403
+                {"error": "Your account is not assigned to a branch"},
+                status=403,
             )
 
-        qs = qs.filter(id=user.branch_id)
+        branches = branches.filter(id=request.user.branch_id)
 
-    branches = list(
-        qs.order_by("id").values()
+    elif request.user.role != "TENANT_ADMIN":
+        return JsonResponse({"error": "Permission denied"}, status=403)
+
+    branch_data = list(
+        branches.order_by("id").values(
+            "id",
+            "name",
+            "location",
+            "manager_name",
+            "phone",
+            "capacity",
+            "tenant_id",
+        )
     )
 
-    return JsonResponse(
-        branches,
-        safe=False
-    )
+    return JsonResponse(branch_data, safe=False, status=200)
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branch_members(request, branch_id):
+    """List members belonging to a specific branch."""
+
     tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
-            status=403
+            status=403,
         )
 
-    # Get branch only from the user's tenant
+    if request.user.role not in ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]:
+        return JsonResponse({"error": "Permission denied"}, status=403)
+
     try:
         branch = Branch.objects.get(
             id=branch_id,
-            tenant=tenant
+            tenant=tenant,
         )
     except Branch.DoesNotExist:
-        return JsonResponse(
-            {"error": "Branch not found or access denied"},
-            status=404
-        )
+        return JsonResponse({"error": "Branch not found"}, status=404)
 
-    # Branch Admin and Staff can access only their own branch
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
-        if not request.user.branch_id:
-            return JsonResponse(
-                {"error": "User is not assigned to a branch"},
-                status=403
-            )
-
         if request.user.branch_id != branch.id:
             return JsonResponse(
-                {"error": "You are not permitted to access this branch"},
-                status=403
+                {"error": "You cannot access another branch"},
+                status=403,
             )
 
-    try:
-        members = (
-            Member.objects
-            .filter(
-                tenant=tenant,
-                branch=branch
-            )
-            .select_related("plan", "branch")
+    members = Member.objects.filter(
+        tenant=tenant,
+        branch=branch,
+    ).order_by("id")
+
+    # Return model fields without exposing unrelated tenant data.
+    member_data = list(
+        members.values(
+            "id",
+            "branch_id",
+            "tenant_id",
+        )
+    )
+
+    return JsonResponse(
+        {
+            "branch": {
+                "id": branch.id,
+                "name": branch.name,
+            },
+            "count": len(member_data),
+            "members": member_data,
+        },
+        status=200,
+    )
+
+
+@api_view(["PUT", "PATCH"])
+@permission_classes([IsAuthenticated])
+def update_branch(request, branch_id):
+    """Update a branch within the logged-in user's tenant."""
+
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403,
         )
 
-        member_data = [
-            {
-                "id": m.id,
-                "name": m.name,
-                "phone": m.phone,
-                "email": m.email,
-                "plan": {
-                    "id": m.plan.id,
-                    "name": m.plan.name,
-                    "duration": m.plan.duration,
-                    "price": m.plan.price,
-                } if m.plan else None,
-            }
-            for m in members
-        ]
+    if request.user.role not in ["TENANT_ADMIN", "BRANCH_ADMIN"]:
+        return JsonResponse(
+            {"error": "You do not have permission to update branches"},
+            status=403,
+        )
 
-        return JsonResponse({
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant,
+        )
+    except Branch.DoesNotExist:
+        return JsonResponse({"error": "Branch not found"}, status=404)
+
+    if request.user.role == "BRANCH_ADMIN":
+        if request.user.branch_id != branch.id:
+            return JsonResponse(
+                {"error": "You cannot update another branch"},
+                status=403,
+            )
+
+    data = request.data
+
+    if "name" in data:
+        name = str(data.get("name", "")).strip()
+        if not name:
+            return JsonResponse(
+                {"error": "Branch name cannot be empty"},
+                status=400,
+            )
+        branch.name = name
+
+    if "location" in data:
+        branch.location = str(data.get("location", "")).strip()
+
+    if "manager_name" in data:
+        branch.manager_name = str(data.get("manager_name", "")).strip()
+
+    if "phone" in data:
+        phone = str(data.get("phone", "")).strip()
+        if not phone.isdigit() or len(phone) != 10:
+            return JsonResponse(
+                {"error": "Enter a valid 10-digit mobile number"},
+                status=400,
+            )
+        branch.phone = phone
+
+    if "capacity" in data:
+        try:
+            capacity = int(data.get("capacity"))
+            if capacity <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JsonResponse(
+                {"error": "Capacity must be a positive whole number"},
+                status=400,
+            )
+        branch.capacity = capacity
+
+    branch.save()
+
+    return JsonResponse(
+        {
+            "message": "Branch updated successfully",
             "branch": {
                 "id": branch.id,
                 "name": branch.name,
                 "location": branch.location,
+                "manager_name": branch.manager_name,
+                "phone": branch.phone,
+                "capacity": branch.capacity,
             },
-            "customers": member_data
-        })
-
-    except Exception as e:
-        return JsonResponse(
-            {"error": str(e)},
-            status=500
-        )
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def update_branch(request, branch_id):
-    tenant = get_tenant(request)
-    user = request.user
-
-    if tenant is None:
-        return JsonResponse(
-            {"error": "User is not assigned to a tenant"},
-            status=403
-        )
-
-    # Only Tenant Admin and Branch Admin can update branches
-    if user.role not in [
-        "TENANT_ADMIN",
-        "BRANCH_ADMIN"
-    ]:
-        return JsonResponse(
-            {"error": "You are not permitted to update branches"},
-            status=403
-        )
-
-    # Get branch only from the user's tenant
-    try:
-        branch = Branch.objects.get(
-            id=branch_id,
-            tenant=tenant
-        )
-    except Branch.DoesNotExist:
-        return JsonResponse(
-            {"error": "Branch not found"},
-            status=404
-        )
-
-    # Branch Admin can update ONLY their own branch
-    if user.role == "BRANCH_ADMIN":
-        if not user.branch_id:
-            return JsonResponse(
-                {"error": "User is not assigned to a branch"},
-                status=403
-            )
-
-        if user.branch_id != branch.id:
-            return JsonResponse(
-                {"error": "You are not permitted to update this branch"},
-                status=403
-            )
-
-    # Update branch fields
-    branch.name = request.POST.get("name")
-    branch.location = request.POST.get("location")
-    branch.manager_name = request.POST.get("manager_name")
-    branch.phone = request.POST.get("phone")
-    branch.capacity = request.POST.get("capacity")
-
-    branch.save()
-
-    return JsonResponse({
-        "message": "Branch updated successfully"
-    })
+        },
+        status=200,
+    )
 
 
 @api_view(["DELETE"])
 @permission_classes([IsAuthenticated])
 def delete_branch(request, branch_id):
+    """Delete a branch, only if it has no members."""
+
     tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
-            status=403
+            status=403,
         )
 
-    # Only Tenant Admin can delete branches
     if request.user.role != "TENANT_ADMIN":
         return JsonResponse(
             {"error": "Only Tenant Admin can delete branches"},
-            status=403
+            status=403,
         )
 
     try:
         branch = Branch.objects.get(
             id=branch_id,
-            tenant=tenant
+            tenant=tenant,
         )
     except Branch.DoesNotExist:
+        return JsonResponse({"error": "Branch not found"}, status=404)
+
+    if Member.objects.filter(
+        tenant=tenant,
+        branch=branch,
+    ).exists():
         return JsonResponse(
-            {"error": "Branch not found"},
-            status=404
+            {
+                "error": (
+                    "This branch has members. Transfer or remove its members "
+                    "before deleting the branch."
+                )
+            },
+            status=400,
         )
 
+    branch_name = branch.name
     branch.delete()
 
-    return JsonResponse({
-        "message": "Branch deleted successfully"
-    })
+    return JsonResponse(
+        {
+            "message": f"Branch '{branch_name}' deleted successfully",
+        },
+        status=200,
+    )
 
 
-
-from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.db.models import Sum
@@ -3315,17 +3490,12 @@ def expired_members(request):
     )
 
 
-import json
-from datetime import date, datetime, timedelta
-
-from django.conf import settings
-from django.db.models import Sum
-from django.http import JsonResponse
-from django.shortcuts import get_object_or_404
-from rest_framework.response import Response
 from groq import Groq
 
-from .serializers import GymEquipmentSerializer
+# ===================================
+# PRODUCTS 
+# ===================================
+
 from .tenant_utils import get_tenant, get_branch_filter
 
 @api_view(["POST"])
@@ -3406,6 +3576,7 @@ def create_product(request):
         },
         status=201
     )
+
 
 
 @api_view(["GET"])
@@ -3601,10 +3772,10 @@ def delete_product(request, product_id):
         status=200
     )
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def sales_list(request):
-
     tenant = get_tenant(request)
 
     if tenant is None:
@@ -3613,11 +3784,7 @@ def sales_list(request):
             status=403
         )
 
-    period = request.GET.get(
-        "period",
-        "daily"
-    ).lower()
-
+    period = request.GET.get("period", "daily").lower()
     selected_date = request.GET.get("date")
 
     start_date, end_date = get_period_dates(
@@ -3640,17 +3807,16 @@ def sales_list(request):
         )
         .select_related(
             "product",
+            "product__branch",
             "member",
             "member__branch"
         )
     )
 
-    # -----------------------------------------
-    # Branch restriction
-    # -----------------------------------------
+    # Branch filtering according to the user's role.
+    role = request.user.role
 
-    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
-
+    if role in ["BRANCH_ADMIN", "STAFF"]:
         if not request.user.branch_id:
             return JsonResponse(
                 {"error": "User is not assigned to a branch"},
@@ -3658,13 +3824,46 @@ def sales_list(request):
             )
 
         sales = sales.filter(
-            member__branch_id=request.user.branch_id
+            product__branch_id=request.user.branch_id
+        )
+
+    elif role == "TENANT_ADMIN":
+        branch_id = request.GET.get("branch", "all")
+
+        if branch_id != "all":
+            try:
+                branch = Branch.objects.get(
+                    id=branch_id,
+                    tenant=tenant
+                )
+            except (Branch.DoesNotExist, ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "Invalid branch selected"},
+                    status=400
+                )
+
+            sales = sales.filter(
+                product__branch_id=branch.id
+            )
+
+    else:
+        return JsonResponse(
+            {"error": "You do not have permission to view sales"},
+            status=403
         )
 
     sales = sales.order_by("-sold_at")
 
-    data = [
-        {
+    data = []
+
+    for sale in sales:
+        product_branch = getattr(
+            sale.product,
+            "branch",
+            None
+        )
+
+        data.append({
             "id": sale.id,
 
             "member_id": (
@@ -3680,20 +3879,11 @@ def sales_list(request):
             ),
 
             "product": sale.product.name,
-
             "category": sale.product.category,
-
             "quantity": sale.quantity,
-
             "payment_method": sale.payment_method,
-
-            "unit_price": float(
-                sale.unit_price
-            ),
-
-            "total_amount": float(
-                sale.total_amount
-            ),
+            "unit_price": float(sale.unit_price),
+            "total_amount": float(sale.total_amount),
 
             "sold_at": sale.sold_at.strftime(
                 "%d-%m-%Y %H:%M"
@@ -3701,25 +3891,21 @@ def sales_list(request):
 
             "branch": (
                 {
-                    "id": sale.member.branch.id,
-                    "name": sale.member.branch.name,
+                    "id": product_branch.id,
+                    "name": product_branch.name,
                 }
-                if sale.member and sale.member.branch
+                if product_branch
                 else None
             ),
-        }
-        for sale in sales
-    ]
+        })
 
-    return JsonResponse(
-        {
-            "success": True,
-            "period": period,
-            "start_date": start_date,
-            "end_date": end_date,
-            "sales": data
-        }
-    )
+    return JsonResponse({
+        "success": True,
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
+        "sales": data,
+    })
 
 
 @api_view(["GET"])
@@ -4285,7 +4471,6 @@ def delete_staff(request, staff_id):
 import json
 from datetime import datetime, timedelta
 
-from django.db import transaction
 from django.http import JsonResponse
 
 @api_view(["POST"])
@@ -4856,37 +5041,78 @@ def add_member_payment(request, member_id):
 # ============================================================
 # ENQUIRY
 # ============================================================
+
+from django.http import JsonResponse
+from django.shortcuts import get_object_or_404
+
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_enquiry(request):
     tenant = get_tenant(request)
 
     if tenant is None:
-        return JsonResponse({
-            "error": "User is not assigned to a tenant"
-        }, status=403)
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403,
+        )
 
-    name = request.POST.get("name")
-    phone = request.POST.get("phone")
-    plan = request.POST.get("plan")
-    edate = request.POST.get("date")
+    name = request.data.get("name", "").strip()
+    phone = request.data.get("phone", "").strip()
+    plan = request.data.get("plan") or None
+    edate = request.data.get("date") or None
 
     if not name:
-        return JsonResponse({
-            "error": "Name is required"
-        }, status=400)
+        return JsonResponse({"error": "Name is required"}, status=400)
 
-    if not (phone and phone.isdigit() and len(phone) == 10):
-        return JsonResponse({
-            "error": "Enter a valid 10-digit mobile number"
-        }, status=400)
+    if not (phone.isdigit() and len(phone) == 10):
+        return JsonResponse(
+            {"error": "Enter a valid 10-digit mobile number"},
+            status=400,
+        )
+
+    role = request.user.role
+
+    if role == "TENANT_ADMIN":
+        branch_id = request.data.get("branch_id")
+
+        if not branch_id:
+            return JsonResponse(
+                {"error": "Please select a branch"},
+                status=400,
+            )
+
+        branch = get_object_or_404(
+            Branch,
+            id=branch_id,
+            tenant=tenant,
+        )
+
+    elif role in ["BRANCH_ADMIN", "STAFF"]:
+        branch = getattr(request.user, "branch", None)
+
+        if branch is None or branch.tenant_id != tenant.id:
+            return JsonResponse(
+                {"error": "User is not assigned to a valid branch"},
+                status=403,
+            )
+
+    else:
+        return JsonResponse(
+            {"error": "You are not allowed to add enquiries"},
+            status=403,
+        )
 
     enquiry = Enquiry.objects.create(
         tenant=tenant,
+        branch=branch,
         name=name,
         phone=phone,
         plan=plan,
-        date=edate
+        date=edate,
     )
 
     return JsonResponse({
@@ -4895,7 +5121,9 @@ def add_enquiry(request):
         "name": enquiry.name,
         "phone": enquiry.phone,
         "plan": enquiry.plan,
-        "date": enquiry.date
+        "date": enquiry.date,
+        "branch_id": enquiry.branch_id,
+        "branch_name": branch.name,
     }, status=201)
 
 
@@ -4905,15 +5133,31 @@ def view_enquiry(request):
     tenant = get_tenant(request)
 
     if tenant is None:
-        return JsonResponse({
-            "error": "User is not assigned to a tenant"
-        }, status=403)
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403,
+        )
 
-    enquiries = (
-        Enquiry.objects
-        .filter(tenant=tenant)
-        .order_by("-id")
-    )
+    enquiries = Enquiry.objects.filter(tenant=tenant)
+
+    role = request.user.role
+
+    if role in ["BRANCH_ADMIN", "STAFF"]:
+        branch = getattr(request.user, "branch", None)
+
+        if branch is None or branch.tenant_id != tenant.id:
+            return JsonResponse(
+                {"error": "User is not assigned to a valid branch"},
+                status=403,
+            )
+
+        enquiries = enquiries.filter(branch=branch)
+
+    elif role == "TENANT_ADMIN":
+        branch_id = request.query_params.get("branch_id")
+
+        if branch_id:
+            enquiries = enquiries.filter(branch_id=branch_id)
 
     data = [
         {
@@ -4922,8 +5166,10 @@ def view_enquiry(request):
             "phone": e.phone,
             "plan": e.plan,
             "date": e.date,
+            "branch_id": e.branch_id,
+            "branch_name": e.branch.name if e.branch else None,
         }
-        for e in enquiries
+        for e in enquiries.order_by("-id")
     ]
 
     return JsonResponse(data, safe=False)
@@ -4935,30 +5181,37 @@ def delete_enquiry(request, enquiry_id):
     tenant = get_tenant(request)
 
     if tenant is None:
-        return JsonResponse({
-            "error": "User is not assigned to a tenant"
-        }, status=403)
+        return JsonResponse(
+            {"error": "User is not assigned to a tenant"},
+            status=403,
+        )
 
-    if request.user.role not in [
-        "TENANT_ADMIN",
-        "BRANCH_ADMIN"
-    ]:
-        return JsonResponse({
-            "error": "You are not allowed to delete enquiries"
-        }, status=403)
+    if request.user.role not in ["TENANT_ADMIN", "BRANCH_ADMIN"]:
+        return JsonResponse(
+            {"error": "You are not allowed to delete enquiries"},
+            status=403,
+        )
 
     enquiry = get_object_or_404(
         Enquiry,
         id=enquiry_id,
-        tenant=tenant
+        tenant=tenant,
     )
+
+    if request.user.role == "BRANCH_ADMIN":
+        branch = getattr(request.user, "branch", None)
+
+        if branch is None or enquiry.branch_id != branch.id:
+            return JsonResponse(
+                {"error": "You cannot delete this enquiry"},
+                status=403,
+            )
 
     enquiry.delete()
 
     return JsonResponse({
-        "message": "Enquiry deleted successfully"
+        "message": "Enquiry deleted successfully",
     })
-
 
 # ============================================================
 # EXPENSES / INCOME (manual entries + reports)
@@ -7004,198 +7257,391 @@ def complete_workout_day(request, member_id):
 # GYM EQUIPMENT
 # ============================================================
 
-@api_view(["GET", "POST"])
+from django.shortcuts import get_object_or_404
+
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+from .models import GymEquipment, Branch
+
+
+# -----------------------------------------
+# COMMON PERMISSION / QUERY HELPERS
+# -----------------------------------------
+
+ALLOWED_EQUIPMENT_ROLES = [
+    "TENANT_ADMIN",
+    "BRANCH_ADMIN",
+    "STAFF",
+]
+
+
+def get_equipment_queryset(request, tenant):
+    """
+    Tenant Admin: all equipment for the tenant.
+    Branch Admin / Staff: equipment for their branch only.
+    """
+    queryset = (
+        GymEquipment.objects
+        .filter(tenant=tenant)
+        .select_related("branch")
+    )
+
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+        if not request.user.branch_id:
+            return None
+
+        queryset = queryset.filter(
+            branch_id=request.user.branch_id
+        )
+
+    return queryset
+
+
+def get_equipment_branch(request, tenant):
+    """
+    Tenant Admin selects a branch.
+    Branch Admin / Staff use their assigned branch.
+    """
+    role = request.user.role
+
+    if role in ["BRANCH_ADMIN", "STAFF"]:
+        if not request.user.branch_id:
+            return None, Response(
+                {
+                    "success": False,
+                    "error": "User is not assigned to a branch.",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return request.user.branch, None
+
+    branch_id = request.data.get("branch_id")
+
+    if not branch_id:
+        return None, Response(
+            {
+                "success": False,
+                "error": "Branch is required.",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    try:
+        branch = Branch.objects.get(
+            id=branch_id,
+            tenant=tenant,
+        )
+    except (Branch.DoesNotExist, ValueError, TypeError):
+        return None, Response(
+            {
+                "success": False,
+                "error": "Invalid branch.",
+            },
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    return branch, None
+
+
+# -----------------------------------------
+# 1. LIST EQUIPMENT
+# GET: /gym-equipment/
+# -----------------------------------------
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def gym_equipment(request):
+def list_gym_equipment(request):
     tenant = get_tenant(request)
 
     if tenant is None:
         return Response(
-            {"success": False, "error": "User is not assigned to a tenant."},
-            status=status.HTTP_403_FORBIDDEN
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-    role = request.user.role
-    allowed_roles = ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]
-
-    if role not in allowed_roles:
+    if request.user.role not in ALLOWED_EQUIPMENT_ROLES:
         return Response(
-            {"success": False, "error": "You do not have permission to access equipment."},
-            status=status.HTTP_403_FORBIDDEN
+            {
+                "success": False,
+                "error": "You do not have permission to view equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-    # GET: List equipment visible to this user.
-    if request.method == "GET":
-        equipment = (
-            GymEquipment.objects
-            .filter(tenant=tenant)
-            .select_related("branch")
-            .order_by("name", "weight")
+    equipment = get_equipment_queryset(request, tenant)
+
+    if equipment is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a branch.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-        if role in ["BRANCH_ADMIN", "STAFF"]:
-            if not request.user.branch_id:
-                return Response(
-                    {"success": False, "error": "User is not assigned to a branch."},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+    serializer = GymEquipmentSerializer(
+        equipment.order_by("name", "weight"),
+        many=True,
+    )
 
-            equipment = equipment.filter(
-                branch_id=request.user.branch_id
-            )
+    return Response({
+        "success": True,
+        "equipment": serializer.data,
+    })
 
-        serializer = GymEquipmentSerializer(equipment, many=True)
 
-        return Response({
-            "success": True,
-            "equipment": serializer.data
-        })
+# -----------------------------------------
+# 2. CREATE EQUIPMENT
+# POST: /gym-equipment/create/
+# -----------------------------------------
 
-    # POST: Add equipment.
-    if role in ["BRANCH_ADMIN", "STAFF"]:
-        if not request.user.branch_id:
-            return Response(
-                {"success": False, "error": "User is not assigned to a branch."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def create_gym_equipment(request):
+    tenant = get_tenant(request)
 
-        branch = request.user.branch
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
-    else:
-        branch_id = request.data.get("branch_id")
+    if request.user.role not in ALLOWED_EQUIPMENT_ROLES:
+        return Response(
+            {
+                "success": False,
+                "error": "You do not have permission to create equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
-        if not branch_id:
-            return Response(
-                {"success": False, "error": "Branch is required."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    branch, error_response = get_equipment_branch(
+        request,
+        tenant,
+    )
 
-        try:
-            branch = Branch.objects.get(
-                id=branch_id,
-                tenant=tenant
-            )
-        except Branch.DoesNotExist:
-            return Response(
-                {"success": False, "error": "Invalid branch."},
-                status=status.HTTP_404_NOT_FOUND
-            )
+    if error_response:
+        return error_response
 
     serializer = GymEquipmentSerializer(data=request.data)
 
     if not serializer.is_valid():
         return Response(
-            {"success": False, "errors": serializer.errors},
-            status=status.HTTP_400_BAD_REQUEST
+            {
+                "success": False,
+                "errors": serializer.errors,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
     equipment = serializer.save(
         tenant=tenant,
-        branch=branch
+        branch=branch,
     )
 
     return Response(
         {
             "success": True,
             "message": "Equipment added successfully.",
-            "equipment": GymEquipmentSerializer(equipment).data
+            "equipment": GymEquipmentSerializer(equipment).data,
         },
-        status=status.HTTP_201_CREATED
+        status=status.HTTP_201_CREATED,
     )
 
-    
 
-@api_view(["GET", "PUT", "DELETE"])
+# -----------------------------------------
+# 3. RETRIEVE SINGLE EQUIPMENT
+# GET: /gym-equipment/<equipment_id>/
+# -----------------------------------------
+
+@api_view(["GET"])
 @permission_classes([IsAuthenticated])
-def gym_equipment_detail(request, equipment_id):
+def retrieve_gym_equipment(request, equipment_id):
     tenant = get_tenant(request)
 
     if tenant is None:
         return Response(
-            {"success": False, "error": "User is not assigned to a tenant."},
-            status=status.HTTP_403_FORBIDDEN
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-    role = request.user.role
-
-    if role not in ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]:
+    if request.user.role not in ALLOWED_EQUIPMENT_ROLES:
         return Response(
-            {"success": False, "error": "You do not have permission to access equipment."},
-            status=status.HTTP_403_FORBIDDEN
+            {
+                "success": False,
+                "error": "You do not have permission to view equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-    try:
-        equipment = (
-            GymEquipment.objects
-            .select_related("branch")
-            .get(
-                id=equipment_id,
-                tenant=tenant
-            )
-        )
-    except GymEquipment.DoesNotExist:
+    queryset = get_equipment_queryset(request, tenant)
+
+    if queryset is None:
         return Response(
-            {"success": False, "error": "Equipment not found."},
-            status=status.HTTP_404_NOT_FOUND
+            {
+                "success": False,
+                "error": "User is not assigned to a branch.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-    # Branch-level access control.
-    if role in ["BRANCH_ADMIN", "STAFF"]:
-        if not request.user.branch_id:
-            return Response(
-                {"success": False, "error": "User is not assigned to a branch."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+    equipment = get_object_or_404(
+        queryset,
+        id=equipment_id,
+    )
 
-        if equipment.branch_id != request.user.branch_id:
-            return Response(
-                {"success": False, "error": "You do not have access to this equipment."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+    serializer = GymEquipmentSerializer(equipment)
 
-    if request.method == "GET":
-        return Response({
-            "success": True,
-            "equipment": GymEquipmentSerializer(equipment).data
-        })
+    return Response({
+        "success": True,
+        "equipment": serializer.data,
+    })
 
-    if request.method == "PUT":
-        serializer = GymEquipmentSerializer(
-            equipment,
-            data=request.data
+
+# -----------------------------------------
+# 4. UPDATE EQUIPMENT
+# PUT / PATCH: /gym-equipment/<equipment_id>/update/
+# -----------------------------------------
+
+@api_view(["PUT", "PATCH"])
+@permission_classes([IsAuthenticated])
+def update_gym_equipment(request, equipment_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-        if not serializer.is_valid():
-            return Response(
-                {"success": False, "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Preserve the original tenant and branch.
-        equipment = serializer.save(
-            tenant=tenant,
-            branch=equipment.branch
+    if request.user.role not in ALLOWED_EQUIPMENT_ROLES:
+        return Response(
+            {
+                "success": False,
+                "error": "You do not have permission to update equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
-        return Response({
-            "success": True,
-            "message": "Equipment updated successfully.",
-            "equipment": GymEquipmentSerializer(equipment).data
-        })
+    queryset = get_equipment_queryset(request, tenant)
 
-    if request.method == "DELETE":
-        if role == "STAFF":
-            return Response(
-                {"success": False, "error": "Staff cannot delete equipment."},
-                status=status.HTTP_403_FORBIDDEN
-            )
+    if queryset is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a branch.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
-        equipment.delete()
+    equipment = get_object_or_404(
+        queryset,
+        id=equipment_id,
+    )
 
-        return Response({
-            "success": True,
-            "message": "Equipment deleted successfully."
-        })
+    serializer = GymEquipmentSerializer(
+        equipment,
+        data=request.data,
+        partial=(request.method == "PATCH"),
+    )
+
+    if not serializer.is_valid():
+        return Response(
+            {
+                "success": False,
+                "errors": serializer.errors,
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Keep the existing tenant and branch unchanged.
+    equipment = serializer.save(
+        tenant=tenant,
+        branch=equipment.branch,
+    )
+
+    return Response({
+        "success": True,
+        "message": "Equipment updated successfully.",
+        "equipment": GymEquipmentSerializer(equipment).data,
+    })
+
+
+# -----------------------------------------
+# 5. DELETE EQUIPMENT
+# DELETE: /gym-equipment/<equipment_id>/delete/
+# -----------------------------------------
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def delete_gym_equipment(request, equipment_id):
+    tenant = get_tenant(request)
+
+    if tenant is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a tenant.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if request.user.role not in ALLOWED_EQUIPMENT_ROLES:
+        return Response(
+            {
+                "success": False,
+                "error": "You do not have permission to delete equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    if request.user.role == "STAFF":
+        return Response(
+            {
+                "success": False,
+                "error": "Staff cannot delete equipment.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    queryset = get_equipment_queryset(request, tenant)
+
+    if queryset is None:
+        return Response(
+            {
+                "success": False,
+                "error": "User is not assigned to a branch.",
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    equipment = get_object_or_404(
+        queryset,
+        id=equipment_id,
+    )
+
+    equipment.delete()
+
+    return Response({
+        "success": True,
+        "message": "Equipment deleted successfully.",
+    })
         
 
 from .models import Member, Income, Expense, Sales_product, Payment, Plan
@@ -7208,15 +7654,10 @@ def calculate_growth(current, previous):
     return round(((current - previous) / previous) * 100, 2)
 
 
-import json
-from datetime import date, datetime, timedelta
-
 from django.conf import settings
 from django.db.models import Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
-from groq import Groq
-from .serializers import GymEquipmentSerializer
 from .tenant_utils import get_tenant, get_branch_filter
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -7627,7 +8068,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from django.conf import settings
-from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 

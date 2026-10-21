@@ -48,8 +48,8 @@ urlpatterns = [
 
     path("sell_product/", views.sell_product,name="sell_product"),
     path("sales_list/", views.sales_list,name="sales_list"),
-    path("validate_member/<str:member_id>/", views.validate_member,name="validate_member"),
     path("one_sale/<int:sale_id>/", views.one_sale,name="one_sale"),
+    path("validate_member/<str:member_id>/", views.validate_member,name="validate_member"),
 
     path("staff/create/", views.create_staff,name="create_staff"),
     path("staff/get/", views.get_staffs,name="get_staffs"),
@@ -72,10 +72,12 @@ urlpatterns = [
 
     path("expense_by_category/",views.expense_by_category,name="expense_by_category"),
     path("profit_loss_report/",views.profit_loss_report,name="profit_loss_report"),
-#    path("gym-equipment/create/",views.create_gym_equipment ),
 
-    path("gym-equipment/",views.gym_equipment,name="gym_equipment"),
-    path("gym-equipment/<int:equipment_id>/",views.gym_equipment_detail,name="gym_equipment_detail"),
+    path("gym-equipment/",views.list_gym_equipment,name="list_gym_equipment",),
+    path("gym-equipment/create/",views.create_gym_equipment,name="create_gym_equipment",),
+    path("gym-equipment/<int:equipment_id>/",views.retrieve_gym_equipment,name="retrieve_gym_equipment",),
+    path("gym-equipment/<int:equipment_id>/update/",views.update_gym_equipment,name="update_gym_equipment", ),
+    path("gym-equipment/<int:equipment_id>/delete/",views.delete_gym_equipment,name="delete_gym_equipment",),
 
     path("generate-diet/",views.generate_diet,name="generate-diet"),
     path("generate_workout/",views.generate_workout,name="generate_workout"),

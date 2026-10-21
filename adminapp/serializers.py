@@ -3,6 +3,13 @@ from .models import GymEquipment
 
 
 class GymEquipmentSerializer(serializers.ModelSerializer):
+    branch_id = serializers.IntegerField(read_only=True, allow_null=True)
+    branch_name = serializers.CharField(
+        source="branch.name",
+        read_only=True,
+        allow_null=True,
+    )
+
     class Meta:
         model = GymEquipment
         fields = [
@@ -11,13 +18,16 @@ class GymEquipmentSerializer(serializers.ModelSerializer):
             "quantity",
             "weight",
             "is_available",
+            "branch_id",
+            "branch_name",
             "created_at",
         ]
         read_only_fields = [
             "id",
             "created_at",
+            "branch_id",
+            "branch_name",
         ]
-
 
 from .models import BiometricEmployeeMapping
 

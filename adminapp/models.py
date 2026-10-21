@@ -438,34 +438,17 @@ class Enquiry(TenantBaseModel):
     phone = models.CharField(max_length=20)
     plan=models.CharField(max_length=100, null=True, blank=True)
     date = models.CharField(max_length=50, blank=True, null=True)
+    branch = models.ForeignKey("Branch",on_delete=models.CASCADE,related_name="enquiries",null=True,blank=True,)
 
 class GymEquipment(TenantBaseModel):
     name = models.CharField(max_length=255)
-
     quantity = models.PositiveIntegerField(default=1)
-
-    weight = models.DecimalField(
-        max_digits=6,
-        decimal_places=2,
-        null=True,
-        blank=True
-    )
-
+    weight = models.DecimalField(max_digits=6,decimal_places=2,null=True,blank=True)
     is_available = models.BooleanField(default=True)
-
-    branch = models.ForeignKey(
-        "Branch",
-        on_delete=models.CASCADE,
-        related_name="gym_equipment",
-        null=True,
-        blank=True,
-    )
-
+    branch = models.ForeignKey("Branch",on_delete=models.CASCADE,related_name="gym_equipment",null=True,blank=True,)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         if self.weight:
             return f"{self.name} - {self.weight} kg"
         return self.name
-
-
