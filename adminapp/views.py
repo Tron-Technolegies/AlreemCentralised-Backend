@@ -40,14 +40,23 @@ PAUSE_POLICIES = {
 }
 
 
+
 def get_pause_policy(member):
     if not member.plan:
         return {"max_days": 0, "max_requests": 0}
 
+    duration = getattr(member.plan, "duration", None)
+
+    try:
+        duration = int(duration)
+    except (TypeError, ValueError):
+        return {"max_days": 0, "max_requests": 0}
+
     return PAUSE_POLICIES.get(
-        member.plan.duration,
+        duration,
         {"max_days": 0, "max_requests": 0}
     )
+
 
 
 def get_membership_pause_usage(member):
@@ -1935,7 +1944,13 @@ def get_branches(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_branch_members(request, branch_id):
-    """List members belonging to a specific branch."""
+    """Allow only TENANT_ADMIN to view members of any branch in their tenant."""
+
+    if request.user.role != "TENANT_ADMIN":
+        return JsonResponse(
+            {"error": "Only Tenant Admin can view branch members"},
+            status=403,
+        )
 
     tenant = get_tenant(request)
 
@@ -1945,37 +1960,35 @@ def get_branch_members(request, branch_id):
             status=403,
         )
 
-    if request.user.role not in ["TENANT_ADMIN", "BRANCH_ADMIN", "STAFF"]:
-        return JsonResponse({"error": "Permission denied"}, status=403)
-
     try:
         branch = Branch.objects.get(
             id=branch_id,
             tenant=tenant,
         )
     except Branch.DoesNotExist:
-        return JsonResponse({"error": "Branch not found"}, status=404)
-
-    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
-        if request.user.branch_id != branch.id:
-            return JsonResponse(
-                {"error": "You cannot access another branch"},
-                status=403,
-            )
+        return JsonResponse(
+            {"error": "Branch not found"},
+            status=404,
+        )
 
     members = Member.objects.filter(
         tenant=tenant,
         branch=branch,
-    ).order_by("id")
+    ).select_related("plan").order_by("id")
 
-    # Return model fields without exposing unrelated tenant data.
-    member_data = list(
-        members.values(
-            "id",
-            "branch_id",
-            "tenant_id",
-        )
-    )
+    member_data = [
+        {
+            "id": member.id,
+            "name": member.name,
+            "phone": member.phone,
+            "email": member.email,
+            "plan": (
+                {"name": member.plan.name}
+                if member.plan else None
+            ),
+        }
+        for member in members
+    ]
 
     return JsonResponse(
         {
@@ -1988,7 +2001,6 @@ def get_branch_members(request, branch_id):
         },
         status=200,
     )
-
 
 @api_view(["PUT", "PATCH"])
 @permission_classes([IsAuthenticated])
@@ -2214,10 +2226,10 @@ def get_period_dates(period, selected_date=None):
 
     return start_date, end_date
 
-
 # =========================================================
 # DASHBOARD STATS
 # =========================================================
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_dashboard_stats(request):
@@ -2247,6 +2259,27 @@ def get_dashboard_stats(request):
         request,
         tenant
     )
+
+    # =====================================================
+    # TENANT ADMIN SELECTED BRANCH
+    # =====================================================
+
+    selected_branch = None
+
+    if request.user.role == "TENANT_ADMIN":
+        branch_id = request.GET.get("branch_id")
+
+        if branch_id:
+            try:
+                selected_branch = Branch.objects.get(
+                    id=branch_id,
+                    tenant=tenant
+                )
+            except (Branch.DoesNotExist, ValueError, TypeError):
+                return JsonResponse(
+                    {"error": "Invalid branch"},
+                    status=400
+                )
 
     # =====================================================
     # PERIOD
@@ -2330,6 +2363,11 @@ def get_dashboard_stats(request):
     ).select_related(
         "plan",
         "branch"
+    )
+
+    if selected_branch is not None:
+        member_qs = member_qs.filter(
+            branch_id=selected_branch.id
     )
 
     # =====================================================
@@ -2502,6 +2540,30 @@ def get_dashboard_stats(request):
         expense_qs = expense_qs.filter(
             branch_id=request.user.branch_id
         )
+
+
+    # =====================================================
+    # TENANT ADMIN SELECTED BRANCH FINANCIAL FILTER
+    # =====================================================
+
+    elif request.user.role == "TENANT_ADMIN":
+        if selected_branch is not None:
+
+            # Membership and additional income
+            income_qs = income_qs.filter(
+                Q(member__branch_id=selected_branch.id)
+                | Q(branch_id=selected_branch.id)
+            )
+
+            # Product sales: use the product's selling branch
+            sales_qs = sales_qs.filter(
+                product__branch_id=selected_branch.id
+            )
+
+            # Expenses for the selected branch
+            expense_qs = expense_qs.filter(
+                branch_id=selected_branch.id
+            )
 
     # =====================================================
     # TOTAL / ALL-TIME INCOME
@@ -3071,7 +3133,6 @@ def get_dashboard_stats(request):
 
 
 
-
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_payments(request):
@@ -3198,46 +3259,57 @@ def get_payments(request):
 
     return JsonResponse(data, safe=False)
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def get_blocked_members(request):
-
     tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse(
-            {
-                "error":
-                    "User is not assigned to a tenant"
-            },
-            status=403
+            {"error": "User is not assigned to a tenant"},
+            status=403,
         )
 
-    # -------------------------------------------------
-    # Tenant + branch filtering
-    # -------------------------------------------------
-
+    # Keep the existing role-based branch restrictions.
     members = Member.objects.filter(
         tenant=tenant,
         status="Blocked",
-        **get_branch_filter(
-            request,
-            tenant
-        )
-    ).select_related(
-        "plan",
-        "branch"
+        **get_branch_filter(request, tenant),
     )
 
-    data = [
+    # Apply the dashboard branch selector only for tenant admins.
+    if request.user.role == "TENANT_ADMIN":
+        selected_branch_id = request.query_params.get("branch_id")
 
+        if selected_branch_id and selected_branch_id != "all":
+            try:
+                selected_branch_id = int(selected_branch_id)
+            except (TypeError, ValueError):
+                return JsonResponse(
+                    {"error": "Invalid branch_id"},
+                    status=400,
+                )
+
+            # Ensure the branch belongs to the current tenant.
+            if not Branch.objects.filter(
+                id=selected_branch_id,
+                tenant=tenant,
+            ).exists():
+                return JsonResponse(
+                    {"error": "Invalid branch for this tenant"},
+                    status=400,
+                )
+
+            members = members.filter(branch_id=selected_branch_id)
+
+    members = members.select_related("plan", "branch")
+
+    data = [
         {
             "id": m.id,
-
             "name": m.name,
-
             "phone": m.phone,
-
             "plan": (
                 {
                     "id": m.plan.id,
@@ -3245,44 +3317,30 @@ def get_blocked_members(request):
                     "duration": m.plan.duration,
                     "price": m.plan.price,
                 }
-                if m.plan
-                else None
+                if m.plan else None
             ),
-
             "branch": (
                 {
                     "id": m.branch.id,
                     "name": m.branch.name,
                     "location": m.branch.location,
                 }
-                if m.branch
-                else None
+                if m.branch else None
             ),
-
             "join_date": m.join_date,
-
             "expiry_date": (
                 m.expiry_date.isoformat()
-                if m.expiry_date
-                else None
+                if m.expiry_date else None
             ),
-
             "status": m.status,
-
-            "photo": (
-                m.photo.url
-                if m.photo
-                else None
-            ),
+            "photo": m.photo.url if m.photo else None,
         }
-
         for m in members
     ]
 
-    return JsonResponse(
-        data,
-        safe=False
-    )
+    return JsonResponse(data, safe=False)
+
+    
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def send_whatsapp(request, member_id):
@@ -3325,23 +3383,42 @@ def send_whatsapp(request, member_id):
         ),
     })
 
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def expiring_soon_members(request):
-
     tenant = get_tenant(request)
 
     if tenant is None:
         return JsonResponse(
-            {
-                "error":
-                    "User is not assigned to a tenant"
-            },
-            status=403
+            {"error": "User is not assigned to a tenant"},
+            status=403,
         )
 
-    today = date.today()
+    # Keep the existing role-based branch restrictions.
+    branch_filter = get_branch_filter(request, tenant)
 
+    # Apply the tenant admin's explicitly selected branch.
+    selected_branch_id = request.GET.get("branch_id")
+
+    if request.user.role == "TENANT_ADMIN" and selected_branch_id:
+        try:
+            selected_branch = Branch.objects.get(
+                id=int(selected_branch_id),
+                tenant=tenant,
+            )
+        except (Branch.DoesNotExist, ValueError, TypeError):
+            return JsonResponse(
+                {"error": "Invalid branch"},
+                status=400,
+            )
+
+        branch_filter = {
+            **branch_filter,
+            "branch_id": selected_branch.id,
+        }
+
+    today = date.today()
     start_date = today - timedelta(days=5)
     end_date = today + timedelta(days=5)
 
@@ -3352,12 +3429,9 @@ def expiring_soon_members(request):
             status="Active",
             expiry_date__gte=start_date,
             expiry_date__lte=end_date,
-            **get_branch_filter(request, tenant)
+            **branch_filter,
         )
-        .select_related(
-            "plan",
-            "branch"
-        )
+        .select_related("plan", "branch")
         .order_by("expiry_date")
     )
 
@@ -3366,19 +3440,17 @@ def expiring_soon_members(request):
             "id": member.id,
             "name": member.name,
             "phone": member.phone,
-
             "expiry_date": (
                 member.expiry_date.isoformat()
                 if member.expiry_date
                 else None
             ),
-
             "due_amount": member.due_amount,
-
             "days_left": (
-                member.expiry_date - today
-            ).days,
-
+                (member.expiry_date - today).days
+                if member.expiry_date
+                else None
+            ),
             "plan": (
                 {
                     "id": member.plan.id,
@@ -3388,7 +3460,6 @@ def expiring_soon_members(request):
                 if member.plan
                 else None
             ),
-
             "branch": (
                 {
                     "id": member.branch.id,
@@ -3401,10 +3472,7 @@ def expiring_soon_members(request):
         for member in members
     ]
 
-    return JsonResponse(
-        data,
-        safe=False
-    )
+    return JsonResponse(data, safe=False)
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -4002,18 +4070,22 @@ def one_sale(request, sale_id):
 # ============================================================
 # STAFF
 # ============================================================
+from django.contrib.auth import get_user_model
+from django.db import transaction
+from django.http import JsonResponse
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+
+User = get_user_model()
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def create_staff(request):
-
-    # TENANT_ADMIN and BRANCH_ADMIN can create staff
-    if request.user.role not in [
-        "TENANT_ADMIN",
-        "BRANCH_ADMIN"
-    ]:
+    if request.user.role not in ["TENANT_ADMIN", "BRANCH_ADMIN"]:
         return JsonResponse(
             {"error": "You do not have permission to create staff"},
-            status=403
+            status=403,
         )
 
     tenant = get_tenant(request)
@@ -4021,73 +4093,137 @@ def create_staff(request):
     if tenant is None:
         return JsonResponse(
             {"error": "User is not assigned to a tenant"},
-            status=403
+            status=403,
         )
 
-    # Branch Admin must have a branch
-    if request.user.role == "BRANCH_ADMIN":
+    data = request.data
 
+    # Resolve the branch securely
+    if request.user.role == "BRANCH_ADMIN":
         if not request.user.branch_id:
             return JsonResponse(
                 {"error": "You are not assigned to a branch"},
-                status=403
+                status=403,
             )
 
-        # Branch Admin can only create staff in own branch
         branch = Branch.objects.filter(
             id=request.user.branch_id,
-            tenant=tenant
+            tenant=tenant,
         ).first()
 
         if not branch:
             return JsonResponse(
                 {"error": "Invalid branch assignment"},
-                status=403
+                status=403,
             )
-
     else:
-        # TENANT_ADMIN
-        branch_id = request.POST.get("branch")
+        branch_id = data.get("branch")
 
         if not branch_id:
             return JsonResponse(
                 {"error": "Branch is required"},
-                status=400
+                status=400,
             )
 
         try:
             branch = Branch.objects.get(
                 id=branch_id,
-                tenant=tenant
+                tenant=tenant,
             )
-        except (Branch.DoesNotExist, ValueError):
+        except (Branch.DoesNotExist, ValueError, TypeError):
             return JsonResponse(
                 {"error": "Invalid branch"},
-                status=400
+                status=400,
             )
 
-    phone = request.POST.get("phone")
+    # Validate staff details
+    name = (data.get("name") or "").strip()
+    phone = str(data.get("phone") or "").strip()
 
-    if not phone or not (
-        phone.isdigit() and len(phone) == 10
-    ):
+    if not name:
+        return JsonResponse({"error": "Staff name is required"}, status=400)
+
+    if not (phone.isdigit() and len(phone) == 10):
         return JsonResponse(
             {"error": "Enter a valid 10-digit mobile number"},
-            status=400
+            status=400,
         )
 
-    staff = Staffs.objects.create(
-        tenant=tenant,
-        branch=branch,
-        name=request.POST.get("name"),
-        role=request.POST.get("role"),
-        specialization=request.POST.get("specialization"),
-        phone=phone,
-        experience=request.POST.get("experience"),
-        joining_date=request.POST.get("joining_date"),
-        salary=request.POST.get("salary"),
-        status=request.POST.get("status") or "Active",
-    )
+    # Login is optional
+    create_login = data.get("create_login", False)
+
+    if isinstance(create_login, str):
+        create_login = create_login.lower() in ("true", "1", "yes")
+
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if create_login:
+        if not username or not password:
+            return JsonResponse(
+                {"error": "Username and password are required for login"},
+                status=400,
+            )
+
+        if len(password) < 8:
+            return JsonResponse(
+                {"error": "Password must be at least 8 characters"},
+                status=400,
+            )
+
+        if User.objects.filter(username__iexact=username).exists():
+            return JsonResponse(
+                {"error": "This username is already taken"},
+                status=400,
+            )
+
+        # Enforce one STAFF login per branch
+        if User.objects.filter(
+            role="STAFF",
+            branch=branch,
+            tenant=tenant,
+        ).exists():
+            return JsonResponse(
+                {
+                    "error": (
+                        "A staff login already exists for this branch. "
+                        "Only one staff account is allowed per branch."
+                    )
+                },
+                status=400,
+            )
+
+    try:
+        with transaction.atomic():
+            staff = Staffs.objects.create(
+                tenant=tenant,
+                branch=branch,
+                name=name,
+                role=data.get("role"),
+                specialization=data.get("specialization"),
+                phone=phone,
+                experience=data.get("experience"),
+                joining_date=data.get("joining_date") or None,
+                salary=data.get("salary") or None,
+                status=data.get("status") or "Active",
+            )
+
+            if create_login:
+                User.objects.create_user(
+                    username=username,
+                    password=password,
+                    role="STAFF",
+                    tenant=tenant,
+                    branch=branch,
+                )
+
+    except Exception:
+        # The transaction rolls back if either database creation fails.
+        # Log the exception server-side when adding production logging.
+        return JsonResponse(
+            {"error": "Unable to create staff. Please check the submitted details."},
+            status=400,
+        )
 
     return JsonResponse(
         {
@@ -4098,8 +4234,9 @@ def create_staff(request):
                 "id": branch.id,
                 "name": branch.name,
             },
+            "login_created": bool(create_login),
         },
-        status=201
+        status=201,
     )
 
 from django.db.models import Sum
@@ -4469,7 +4606,6 @@ def delete_staff(request, staff_id):
 # ============================================================
 
 import json
-from datetime import datetime, timedelta
 
 from django.http import JsonResponse
 
@@ -5045,8 +5181,6 @@ def add_member_payment(request, member_id):
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 
 @api_view(["POST"])
@@ -5559,74 +5693,6 @@ def add_staff_payment(request, staff_id):
     }, status=201)
 
 
-# @api_view(["GET"])
-# @permission_classes([IsAuthenticated])
-# def view_expenses(request):
-
-#     tenant = get_tenant(request)
-
-#     if tenant is None:
-#         return JsonResponse({
-#             "error": "User is not assigned to a tenant"
-#         }, status=403)
-
-#     qs = (
-#         Expense.objects
-#         .filter(tenant=tenant)
-#         .select_related("branch")
-#         .order_by("-date", "-id")
-#     )
-
-#     # ----------------------------------
-#     # BRANCH ADMIN / STAFF
-#     # ----------------------------------
-
-#     if request.user.role in [
-#         "BRANCH_ADMIN",
-#         "STAFF"
-#     ]:
-
-#         if not request.user.branch_id:
-#             return JsonResponse({
-#                 "error": "User is not assigned to a branch"
-#             }, status=403)
-
-#         qs = qs.filter(
-#             branch_id=request.user.branch_id
-#         )
-
-#     data = [
-#         {
-#             "id": e.id,
-#             "title": e.title,
-#             "name": e.name,
-#             "phone": e.phone,
-#             "category": e.category,
-#             "description": e.description,
-#             "amount": str(e.amount),
-#             "payment_method": e.payment_method,
-#             "date": e.date.strftime("%Y-%m-%d"),
-#             "branch": (
-#                 {
-#                     "id": e.branch.id,
-#                     "name": e.branch.name,
-#                     "location": e.branch.location,
-#                 }
-#                 if e.branch
-#                 else None
-#             ),
-#             "type": (
-#                 "Salary"
-#                 if e.is_system_generated
-#                 else "Additional"
-#             ),
-#         }
-#         for e in qs
-#     ]
-
-#     return JsonResponse(data, safe=False)
-
-    
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def add_income(request):
@@ -5727,7 +5793,7 @@ def incomes(request):
     data = []
 
     # -------------------------
-    # INCOME
+    # ADDITIONAL / MEMBERSHIP INCOME
     # -------------------------
 
     income_qs = (
@@ -5741,7 +5807,7 @@ def incomes(request):
         .order_by("-date", "-id")
     )
 
-    # Branch-level filtering
+    # Restrict branch admin and staff to their own branch
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
         if not request.user.branch_id:
             return JsonResponse({
@@ -5752,11 +5818,17 @@ def incomes(request):
 
         income_qs = income_qs.filter(
             Q(member__branch_id=request.user.branch_id)
-            |
-            Q(branch_id=request.user.branch_id)
+            | Q(branch_id=request.user.branch_id)
         )
 
     for income in income_qs:
+        # Use the income's assigned branch first.
+        # For member-linked income, fall back to the member's branch.
+        branch = income.branch
+
+        if branch is None and income.member:
+            branch = income.member.branch
+
         data.append({
             "id": f"in_{income.id}",
             "title": income.title,
@@ -5772,6 +5844,11 @@ def incomes(request):
                 if income.is_system_generated
                 else "Additional"
             ),
+
+            # ADDED: Branch information for React filtering
+            "branch_id": branch.id if branch else None,
+            "branch_name": branch.name if branch else None,
+
             "_sort_date": income.date,
         })
 
@@ -5790,13 +5867,16 @@ def incomes(request):
         .order_by("-sold_at", "-id")
     )
 
-    # Branch-level filtering
+    # Restrict branch admin and staff to their own branch
     if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
         sales_qs = sales_qs.filter(
             member__branch_id=request.user.branch_id
         )
 
     for sale in sales_qs:
+        # Sales are associated with the member's branch here.
+        branch = sale.member.branch if sale.member else None
+
         data.append({
             "id": f"sa_{sale.id}",
             "title": "Product Sale",
@@ -5813,6 +5893,11 @@ def incomes(request):
             "payment_method": sale.payment_method,
             "date": sale.sold_at.strftime("%Y-%m-%d"),
             "type": "Product Sale",
+
+            # ADDED: Branch information for React filtering
+            "branch_id": branch.id if branch else None,
+            "branch_name": branch.name if branch else None,
+
             "_sort_date": sale.sold_at,
         })
 
@@ -5844,11 +5929,7 @@ def income_by_members(request):
             "error": "User is not assigned to a tenant"
         }, status=403)
 
-    period = request.GET.get(
-        "period",
-        "daily"
-    ).lower()
-
+    period = request.GET.get("period", "daily").lower()
     selected_date = request.GET.get("date")
 
     start_date, end_date = get_period_dates(
@@ -5860,6 +5941,26 @@ def income_by_members(request):
         return JsonResponse({
             "error": "Invalid period"
         }, status=400)
+
+    # --------------------------------------------------
+    # OPTIONAL TENANT-ADMIN BRANCH FILTER
+    # --------------------------------------------------
+
+    selected_branch = None
+
+    if request.user.role == "TENANT_ADMIN":
+        branch_id = request.GET.get("branch_id")
+
+        if branch_id:
+            try:
+                selected_branch = Branch.objects.get(
+                    id=branch_id,
+                    tenant=tenant
+                )
+            except (Branch.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({
+                    "error": "Invalid branch"
+                }, status=400)
 
     # --------------------------------------------------
     # MEMBERSHIP + ADDITIONAL INCOME
@@ -5880,28 +5981,29 @@ def income_by_members(request):
         )
     )
 
-    # Branch restriction
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
+    # Restrict branch admins and staff to their own branch.
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
         if not request.user.branch_id:
             return JsonResponse({
                 "error": "User is not assigned to a branch"
             }, status=403)
 
-        # Membership income has member -> branch
-        # Additional income has branch directly
         from django.db.models import Q
 
         base_income = base_income.filter(
-            Q(
-                member__branch_id=request.user.branch_id
-            )
-            |
-            Q(
-                branch_id=request.user.branch_id
-            )
+            Q(member__branch_id=request.user.branch_id)
+            | Q(branch_id=request.user.branch_id)
+        )
+
+    # Restrict tenant admins when a specific branch is selected.
+    elif selected_branch is not None:
+
+        from django.db.models import Q
+
+        base_income = base_income.filter(
+            Q(member__branch=selected_branch)
+            | Q(branch=selected_branch)
         )
 
     # --------------------------------------------------
@@ -5912,28 +6014,18 @@ def income_by_members(request):
         base_income
         .filter(
             category="membership",
-            member__plan__name__in=[
-                "Silver",
-                "Gold"
-            ]
+            member__plan__name__in=["Silver", "Gold"]
         )
-        .aggregate(
-            total=Sum("amount")
-        )["total"] or 0
+        .aggregate(total=Sum("amount"))["total"] or 0
     )
 
     premium_income = (
         base_income
         .filter(
             category="membership",
-            member__plan__name__in=[
-                "Premium",
-                "Platinum"
-            ]
+            member__plan__name__in=["Premium", "Platinum"]
         )
-        .aggregate(
-            total=Sum("amount")
-        )["total"] or 0
+        .aggregate(total=Sum("amount"))["total"] or 0
     )
 
     # --------------------------------------------------
@@ -5942,15 +6034,9 @@ def income_by_members(request):
 
     additional_income = (
         base_income
-        .filter(
-            is_system_generated=False
-        )
-        .exclude(
-            category="membership"
-        )
-        .aggregate(
-            total=Sum("amount")
-        )["total"] or 0
+        .filter(is_system_generated=False)
+        .exclude(category="membership")
+        .aggregate(total=Sum("amount"))["total"] or 0
     )
 
     # --------------------------------------------------
@@ -5967,28 +6053,36 @@ def income_by_members(request):
         .select_related(
             "member",
             "member__branch",
-            "product"
+            "product",
+            "product__branch"
         )
     )
 
-    # Branch restriction for product sales
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
+    # Branch admins and staff: preserve the existing behavior.
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
+
+        if not request.user.branch_id:
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
+
         sales_qs = sales_qs.filter(
             member__branch_id=request.user.branch_id
         )
 
+    # Tenant admin: filter product sales by selling branch.
+    elif selected_branch is not None:
+        sales_qs = sales_qs.filter(
+            product__branch_id=selected_branch.id
+        )
+
     product_sales = (
         sales_qs
-        .aggregate(
-            total=Sum("total_amount")
-        )["total"] or 0
+        .aggregate(total=Sum("total_amount"))["total"] or 0
     )
 
     # --------------------------------------------------
-    # RESPONSE
+    # RESPONSE — KEEP EXISTING STRUCTURE
     # --------------------------------------------------
 
     return JsonResponse({
@@ -5996,7 +6090,6 @@ def income_by_members(request):
         "period": period,
         "start_date": start_date,
         "end_date": end_date,
-
         "income": [
             {
                 "name": "Basic",
@@ -6023,28 +6116,12 @@ def expense_by_category(request):
 
     tenant = get_tenant(request)
 
-    # -----------------------------------------
-    # TENANT
-    # -----------------------------------------
-
     if tenant is None:
-        return JsonResponse(
-            {
-                "error":
-                    "User is not assigned to a tenant"
-            },
-            status=403
-        )
+        return JsonResponse({
+            "error": "User is not assigned to a tenant"
+        }, status=403)
 
-    # -----------------------------------------
-    # PERIOD
-    # -----------------------------------------
-
-    period = request.GET.get(
-        "period",
-        "daily"
-    ).lower()
-
+    period = request.GET.get("period", "daily").lower()
     selected_date = request.GET.get("date")
 
     start_date, end_date = get_period_dates(
@@ -6053,16 +6130,9 @@ def expense_by_category(request):
     )
 
     if start_date is None:
-        return JsonResponse(
-            {
-                "error": "Invalid period"
-            },
-            status=400
-        )
-
-    # -----------------------------------------
-    # EXPENSES
-    # -----------------------------------------
+        return JsonResponse({
+            "error": "Invalid period"
+        }, status=400)
 
     expenses = Expense.objects.filter(
         tenant=tenant,
@@ -6070,64 +6140,69 @@ def expense_by_category(request):
         date__lte=end_date
     )
 
-    # -----------------------------------------
-    # BRANCH ADMIN / STAFF
-    # -----------------------------------------
+    # --------------------------------------------------
+    # BRANCH FILTERING
+    # --------------------------------------------------
 
-    if request.user.role in [
-        "BRANCH_ADMIN",
-        "STAFF"
-    ]:
+    if request.user.role in ["BRANCH_ADMIN", "STAFF"]:
 
         if not request.user.branch_id:
-            return JsonResponse(
-                {
-                    "error":
-                        "User is not assigned to a branch"
-                },
-                status=403
-            )
+            return JsonResponse({
+                "error": "User is not assigned to a branch"
+            }, status=403)
 
         expenses = expenses.filter(
             branch_id=request.user.branch_id
         )
 
-    # -----------------------------------------
-    # CATEGORY
-    # -----------------------------------------
+    elif request.user.role == "TENANT_ADMIN":
 
-    qs = (
+        branch_id = request.GET.get("branch_id")
+
+        if branch_id:
+            try:
+                branch = Branch.objects.get(
+                    id=branch_id,
+                    tenant=tenant
+                )
+            except (Branch.DoesNotExist, ValueError, TypeError):
+                return JsonResponse({
+                    "error": "Invalid branch"
+                }, status=400)
+
+            expenses = expenses.filter(
+                branch_id=branch.id
+            )
+
+    elif request.user.role != "SUPER_ADMIN":
+        return JsonResponse({
+            "error": "Permission denied"
+        }, status=403)
+
+    # --------------------------------------------------
+    # GROUP EXPENSES BY CATEGORY
+    # --------------------------------------------------
+
+    expense_categories = (
         expenses
         .values("category")
-        .annotate(
-            total=Sum("amount")
-        )
-        .order_by("-total")
+        .annotate(total=Sum("amount"))
+        .order_by("category")
     )
 
-    data = [
-        {
-            "category": expense["category"],
-            "amount": float(
-                expense["total"] or 0
-            )
-        }
-        for expense in qs
-    ]
-
-    return JsonResponse(
-        {
-            "success": True,
-            "period": period,
-            "start_date": start_date.strftime(
-                "%Y-%m-%d"
-            ),
-            "end_date": end_date.strftime(
-                "%Y-%m-%d"
-            ),
-            "expenses": data,
-        }
-    )
+    return JsonResponse({
+        "success": True,
+        "period": period,
+        "start_date": start_date,
+        "end_date": end_date,
+        "expenseCategories": [
+            {
+                "category": item["category"],
+                "total": float(item["total"] or 0)
+            }
+            for item in expense_categories
+        ]
+    })
 
 
 @api_view(["GET"])
@@ -7259,9 +7334,6 @@ def complete_workout_day(request, member_id):
 
 from django.shortcuts import get_object_or_404
 
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from .models import GymEquipment, Branch
@@ -8064,17 +8136,11 @@ def unlink_biometric_employee(request, mapping_id):
 
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
 
 from .models import Attendance, BiometricEmployeeMapping
 from .essl_service import call_essl

@@ -186,26 +186,9 @@ class Staffs(TenantBaseModel):
 
 class BiometricEmployeeMapping(TenantBaseModel):
     essl_employee_code = models.CharField(max_length=100)
-    essl_employee_name = models.CharField(
-        max_length=255, blank=True, default=""
-    )
-
-    member = models.ForeignKey(
-        "adminapp.Member",
-        on_delete=models.PROTECT,
-        related_name="biometric_mappings",
-        null=True,
-        blank=True,
-    )
-
-    staff = models.ForeignKey(
-        "adminapp.Staffs",
-        on_delete=models.PROTECT,
-        related_name="biometric_mappings",
-        null=True,
-        blank=True,
-    )
-
+    essl_employee_name = models.CharField(max_length=255, blank=True, default="")
+    member = models.ForeignKey("adminapp.Member",on_delete=models.PROTECT,related_name="biometric_mappings",null=True,blank=True,)
+    staff = models.ForeignKey("adminapp.Staffs",on_delete=models.PROTECT,related_name="biometric_mappings",null=True,blank=True,)
     is_active = models.BooleanField(default=True)
     last_synced_at = models.DateTimeField(null=True, blank=True)
 
@@ -229,34 +212,12 @@ class BiometricEmployeeMapping(TenantBaseModel):
 
 
 class Attendance(TenantBaseModel):
-    biometric_mapping = models.ForeignKey(
-        "BiometricEmployeeMapping",
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="attendance_records",
-    )
-    device = models.ForeignKey(
-    "adminapp.BiometricDevice",
-    on_delete=models.SET_NULL,
-    null=True,
-    blank=True,
-    related_name="attendance_records",
-    )
+    biometric_mapping = models.ForeignKey("BiometricEmployeeMapping",on_delete=models.SET_NULL,null=True,blank=True,related_name="attendance_records",    )
+    device = models.ForeignKey("adminapp.BiometricDevice",on_delete=models.SET_NULL,null=True,blank=True,related_name="attendance_records",)
     essl_employee_code = models.CharField(max_length=100)
-
     punch_time = models.DateTimeField()
-
-    punch_type = models.CharField(
-        max_length=30,
-        blank=True,
-        default="",
-    )
-
-    raw_data = models.JSONField(
-        default=dict,
-        blank=True,
-    )
+    punch_type = models.CharField(max_length=30,blank=True,default="",   )
+    raw_data = models.JSONField(default=dict,blank=True,)
 
     class Meta:
         ordering = ["-punch_time"]
