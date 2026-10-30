@@ -193,7 +193,7 @@ def sync_essl_employees(tenant=None):
     Fetch employee details from eSSL and create or update
     their biometric mapping records.
     """
-    employee_codes = get_employee_codes()[:1659]
+    employee_codes = get_employee_codes()
 
     synced = 0
     failed = []
@@ -226,3 +226,53 @@ def sync_essl_employees(tenant=None):
         "failed_count": len(failed),
         "failed": failed,
     }
+
+
+def add_essl_employee(
+    employee_code,
+    employee_name,
+    employee_location,
+    employee_role="",
+    verification_type="",
+):
+    """
+    Add an employee to eSSL using UpdateEmployee.
+
+    Verify the exact parameter values and success response
+    against the installed eBioServer documentation.
+    """
+
+    result = call_essl(
+        "UpdateEmployee",
+        {
+            "UserName": settings.ESSL_USERNAME,
+            "Password": settings.ESSL_PASSWORD,
+            "EmployeeCode": str(employee_code),
+            "EmployeeName": employee_name,
+            "EmployeeLocation": employee_location,
+            "EmployeeRole": employee_role,
+            "EmployeeVerificationType": verification_type,
+        },
+    )
+
+    if not result:
+        raise RuntimeError(
+            "eSSL returned an empty UpdateEmployee response."
+        )
+
+    return result
+
+# def add_essl_employee(
+#     employee_code,
+#     employee_name,
+#     employee_location,
+#     employee_role="",
+#     verification_type="",
+# ):
+#     """
+#     TEMPORARY TEST:
+#     Simulate eBioServer employee registration failure.
+#     """
+#     raise RuntimeError(
+#         "TEST: Simulated eBioServer registration failure"
+#     )

@@ -197,7 +197,7 @@ class BiometricEmployeeMapping(TenantBaseModel):
             models.CheckConstraint(
                 condition=(
                     models.Q(member__isnull=True)
-                    | models.Q(staff__isnull=True)
+                    | models.Q(staff__isnull=True) 
                 ),
                 name="biometric_mapping_one_person",
             ),

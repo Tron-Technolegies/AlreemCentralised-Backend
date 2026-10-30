@@ -1,7 +1,7 @@
 from django.http import JsonResponse
 import json
 from datetime import datetime, date, timedelta
-
+from .essl_service import add_essl_employee, get_employee_codes, get_employee_details
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated, BasePermission
 from rest_framework import status
@@ -369,6 +369,110 @@ from .tenant_utils import get_tenant, get_branch_filter
 # ============================================================
 # MEMBERS
 # ============================================================
+
+from django.db import transaction
+from django.utils import timezone
+from .models import BiometricEmployeeMapping
+
+
+def create_member_biometric_mapping(member):
+    existing_codes = set(
+        BiometricEmployeeMapping.objects.values_list(
+            "essl_employee_code", flat=True
+        )
+    )
+
+    # Get codes from eBioServer.
+    remote_codes = set(get_employee_codes())
+
+    candidate = 10001
+
+    while (
+        str(candidate) in existing_codes
+        or str(candidate) in remote_codes
+    ):
+        candidate += 1
+
+    return BiometricEmployeeMapping.objects.create(
+        tenant=member.tenant,
+        essl_employee_code=str(candidate),
+        essl_employee_name=member.name or "",
+        member=member,
+        staff=None,
+        is_active=True,
+        last_synced_at=None,
+    )
+
+
+def register_member_in_essl(mapping):
+    existing_codes = set(get_employee_codes())
+    employee_code = str(mapping.essl_employee_code)
+
+    if employee_code in existing_codes:
+        details = get_employee_details(employee_code)
+        existing_name = (details.get("name") or "").strip()
+        expected_name = (mapping.essl_employee_name or "").strip()
+
+        if existing_name.casefold() != expected_name.casefold():
+            raise RuntimeError(
+                f"Employee code {employee_code} already belongs "
+                f"to '{existing_name}'. Expected '{expected_name}'. "
+                "Registration skipped."
+            )
+
+        # Same code and name already exist in eBioServer.
+        # Mark the mapping as synced without registering again.
+        mapping.last_synced_at = timezone.now()
+        mapping.save(update_fields=["last_synced_at"])
+        return mapping
+
+    result = add_essl_employee(
+        employee_code=employee_code,
+        employee_name=mapping.essl_employee_name,
+        employee_location=settings.ESSL_EMPLOYEE_LOCATION,
+        employee_role="Normal User",
+        verification_type="0",
+    )
+
+    if not result or result.strip().casefold() != "success":
+        raise RuntimeError(f"eSSL registration failed: {result}")
+
+    mapping.last_synced_at = timezone.now()
+    mapping.save(update_fields=["last_synced_at"])
+
+    return mapping
+
+
+def retry_pending_essl_registrations(tenant=None):
+    pending_mappings = BiometricEmployeeMapping.objects.filter(
+        last_synced_at__isnull=True,
+        is_active=True,
+        member__isnull=False,
+    )
+
+    if tenant is not None:
+        pending_mappings = pending_mappings.filter(tenant=tenant)
+
+    results = {
+        "total": pending_mappings.count(),
+        "registered": 0,
+        "failed": 0,
+    }
+
+    for mapping in pending_mappings:
+        try:
+            register_member_in_essl(mapping)
+            results["registered"] += 1
+        except Exception as exc:
+            results["failed"] += 1
+            print(
+                f"eSSL retry failed for code "
+                f"{mapping.essl_employee_code}: {exc}",
+                flush=True,
+            )
+
+    return results
+
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -743,10 +847,35 @@ def create_member(request):
             status="Active",
         )
 
+        # return JsonResponse(
+        #     {
+        #         "message": "Member created successfully",
+        #         "member_id": member.id,
+        #     },
+        #     status=201
+        # )
+
+        try:
+            mapping = create_member_biometric_mapping(member)
+            register_member_in_essl(mapping)
+
+            biometric_status = "registered"
+            biometric_message = "Member registered successfully in eBioServer."
+
+        except Exception as biometric_error:
+            biometric_status = "pending"
+            biometric_message = (
+                "Member created, but biometric registration failed. "
+                "Please retry later."
+            )
+            print(f"eSSL registration error: {biometric_error}", flush=True)
+
         return JsonResponse(
             {
                 "message": "Member created successfully",
                 "member_id": member.id,
+                "biometric_status": biometric_status,
+                "biometric_message": biometric_message,
             },
             status=201
         )
