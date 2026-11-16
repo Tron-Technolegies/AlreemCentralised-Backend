@@ -1,3 +1,5 @@
+# Python zk library to communicate with the biometric device.
+
 from zk import ZK
 
 DEVICE_IP = "192.168.1.202"

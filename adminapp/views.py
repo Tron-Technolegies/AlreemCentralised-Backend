@@ -1,3 +1,4 @@
+from django.db.models.functions import Cast
 from django.http import JsonResponse
 import json
 from datetime import datetime, date, timedelta
@@ -8,7 +9,7 @@ from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum
+from django.db.models import BigIntegerField, Sum
 from django.contrib.auth import get_user_model
 
 User = get_user_model()
@@ -487,21 +488,18 @@ def create_member(request):
         )
 
     try:
-        # Generate member ID only within the selected tenant
-        last_member = (
+        # Generate next ID globally from imported Excel member IDs
+        last_member_id = (
             Member.objects
-            .filter(tenant=tenant)
-            .order_by("-id")
+            .filter(id__regex=r"^[0-9]+$")
+            .annotate(numeric_id=Cast("id", BigIntegerField()))
+            .order_by("-numeric_id")
+            .values_list("numeric_id", flat=True)
             .first()
         )
 
-        next_id = (
-            f"{int(last_member.id) + 1:04d}"
-            if last_member
-            else "0001"
-        )
-
-        # -------------------------------------------------
+        next_id = str((last_member_id or 0) + 1)
+                # -------------------------------------------------
         # Inputs
         # -------------------------------------------------
 
@@ -855,27 +853,27 @@ def create_member(request):
         #     status=201
         # )
 
-        try:
-            mapping = create_member_biometric_mapping(member)
-            register_member_in_essl(mapping)
+        # try:
+        #     mapping = create_member_biometric_mapping(member)
+        #     register_member_in_essl(mapping)
 
-            biometric_status = "registered"
-            biometric_message = "Member registered successfully in eBioServer."
+        #     biometric_status = "registered"
+        #     biometric_message = "Member registered successfully in eBioServer."
 
-        except Exception as biometric_error:
-            biometric_status = "pending"
-            biometric_message = (
-                "Member created, but biometric registration failed. "
-                "Please retry later."
-            )
-            print(f"eSSL registration error: {biometric_error}", flush=True)
+        # except Exception as biometric_error:
+        #     biometric_status = "pending"
+        #     biometric_message = (
+        #         "Member created, but biometric registration failed. "
+        #         "Please retry later."
+        #     )
+        #     print(f"eSSL registration error: {biometric_error}", flush=True)
 
         return JsonResponse(
             {
                 "message": "Member created successfully",
                 "member_id": member.id,
-                "biometric_status": biometric_status,
-                "biometric_message": biometric_message,
+                # "biometric_status": biometric_status,
+                # "biometric_message": biometric_message,
             },
             status=201
         )
@@ -1045,6 +1043,8 @@ def get_members(request):
         data.append({
 
             "id": member.id,
+            "mbid": member.mbid,
+            "name": member.name,
             "name": member.name,
             "phone": member.phone,
             "email": member.email,
@@ -1285,6 +1285,8 @@ def get_member(request, member_id):
         return JsonResponse({"error": str(e)},status=500)
     
     
+
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def update_member(request, member_id):
@@ -1293,59 +1295,36 @@ def update_member(request, member_id):
 
     if tenant is None:
         return JsonResponse(
-            {
-                "error": "User is not assigned to a tenant"
-            },
+            {"error": "User is not assigned to a tenant"},
             status=403
         )
 
     try:
-
         # -------------------------------------------------
-        # IMPORTANT:
-        # Get member only inside current tenant + branch
+        # Get member inside current tenant + branch
         # -------------------------------------------------
 
         member = Member.objects.get(
             id=member_id,
             tenant=tenant,
-            **get_branch_filter(
-                request,
-                tenant
-            )
+            **get_branch_filter(request, tenant)
         )
 
         # -------------------------------------------------
         # Inputs
         # -------------------------------------------------
 
-        name = request.data.get(
-            "name",
-            member.name
-        )
+        name = request.data.get("name", member.name)
 
-        phone = request.data.get(
-            "phone",
-            member.phone
-        )
+        phone = request.data.get("phone", member.phone)
 
-        email = request.data.get(
-            "email",
-            member.email
-        )
+        email = request.data.get("email", member.email)
 
-        plan_id = request.data.get(
-            "plan"
-        )
+        plan_id = request.data.get("plan")
 
-        join_date_str = request.data.get(
-            "join_date"
-        )
+        join_date_str = request.data.get("join_date")
 
-        goal = request.data.get(
-            "goal",
-            member.goal
-        )
+        goal = request.data.get("goal", member.goal)
 
         food_category = request.data.get(
             "food_category",
@@ -1353,41 +1332,29 @@ def update_member(request, member_id):
         )
 
         # -------------------------------------------------
-        # Phone
+        # Phone validation
         # -------------------------------------------------
 
         phone = str(phone).strip()
 
-        if not (
-            phone.isdigit()
-            and len(phone) == 10
-        ):
+        if not (phone.isdigit() and len(phone) == 10):
             return JsonResponse(
-                {
-                    "error":
-                    "Enter a valid 10-digit mobile number"
-                },
+                {"error": "Enter a valid 10-digit mobile number"},
                 status=400
             )
 
-        # Check duplicate phone
         if Member.objects.filter(
             tenant=tenant,
             phone=phone
-        ).exclude(
-            id=member.id
-        ).exists():
+        ).exclude(id=member.id).exists():
 
             return JsonResponse(
-                {
-                    "error":
-                    "Mobile number already exists"
-                },
+                {"error": "Mobile number already exists"},
                 status=400
             )
 
         # -------------------------------------------------
-        # Email
+        # Email validation
         # -------------------------------------------------
 
         if email:
@@ -1397,15 +1364,10 @@ def update_member(request, member_id):
             if Member.objects.filter(
                 tenant=tenant,
                 email=email
-            ).exclude(
-                id=member.id
-            ).exists():
+            ).exclude(id=member.id).exists():
 
                 return JsonResponse(
-                    {
-                        "error":
-                        "Email already exists"
-                    },
+                    {"error": "Email already exists"},
                     status=400
                 )
 
@@ -1418,21 +1380,24 @@ def update_member(request, member_id):
         if plan_id:
 
             try:
-
                 selected_plan = Plan.objects.get(
                     id=plan_id,
                     tenant=tenant
                 )
 
             except Plan.DoesNotExist:
-
                 return JsonResponse(
-                    {
-                        "error":
-                        "Invalid plan selected"
-                    },
+                    {"error": "Invalid plan selected"},
                     status=400
                 )
+
+        if selected_plan is None:
+            return JsonResponse(
+                {
+                    "error": "This member has no membership plan. Please select a plan."
+                },
+                status=400
+            )
 
         # -------------------------------------------------
         # Join date
@@ -1441,37 +1406,28 @@ def update_member(request, member_id):
         if join_date_str:
 
             try:
-
                 join_date = datetime.strptime(
                     str(join_date_str),
                     "%Y-%m-%d"
                 ).date()
 
             except ValueError:
-
                 return JsonResponse(
-                    {
-                        "error":
-                        "Invalid join date"
-                    },
+                    {"error": "Invalid join date"},
                     status=400
                 )
 
         else:
-
             join_date = member.join_date
 
             if isinstance(join_date, str):
-
                 try:
-
                     join_date = datetime.strptime(
                         join_date,
                         "%Y-%m-%d"
                     ).date()
 
                 except ValueError:
-
                     join_date = None
 
         # -------------------------------------------------
@@ -1479,7 +1435,6 @@ def update_member(request, member_id):
         # -------------------------------------------------
 
         try:
-
             weight = float(
                 request.data.get(
                     "weight",
@@ -1494,25 +1449,19 @@ def update_member(request, member_id):
                 ) or 0
             )
 
-        except ValueError:
-
+        except (ValueError, TypeError):
             return JsonResponse(
-                {
-                    "error":
-                    "Invalid height or weight"
-                },
+                {"error": "Invalid height or weight"},
                 status=400
             )
 
         bmi = member.bmi
 
         if height > 0 and weight > 0:
-
             height_m = height / 100
 
             bmi = round(
-                weight /
-                (height_m * height_m),
+                weight / (height_m * height_m),
                 2
             )
 
@@ -1521,7 +1470,6 @@ def update_member(request, member_id):
         # -------------------------------------------------
 
         try:
-
             paid_amount = float(
                 request.data.get(
                     "paid_amount",
@@ -1529,23 +1477,15 @@ def update_member(request, member_id):
                 ) or 0
             )
 
-        except ValueError:
-
+        except (ValueError, TypeError):
             return JsonResponse(
-                {
-                    "error":
-                    "Invalid paid amount"
-                },
+                {"error": "Invalid paid amount"},
                 status=400
             )
 
         if paid_amount < 0:
-
             return JsonResponse(
-                {
-                    "error":
-                    "Paid amount cannot be negative"
-                },
+                {"error": "Paid amount cannot be negative"},
                 status=400
             )
 
@@ -1553,24 +1493,15 @@ def update_member(request, member_id):
         # Plan amount
         # -------------------------------------------------
 
-        plan_amount = float(
-            selected_plan.price or 0
-        )
+        plan_amount = float(selected_plan.price or 0)
 
         if paid_amount > plan_amount:
-
             return JsonResponse(
-                {
-                    "error":
-                    "Paid amount cannot exceed plan price"
-                },
+                {"error": "Paid amount cannot exceed plan price"},
                 status=400
             )
 
-        due_amount = max(
-            plan_amount - paid_amount,
-            0
-        )
+        due_amount = max(plan_amount - paid_amount, 0)
 
         # -------------------------------------------------
         # Expiry date
@@ -1580,35 +1511,27 @@ def update_member(request, member_id):
 
         if join_date and selected_plan:
 
-            duration = int(
-                selected_plan.duration or 0
-            )
+            duration = int(selected_plan.duration or 0)
 
             expiry_date = (
-                join_date +
-                timedelta(days=duration)
+                join_date + timedelta(days=duration)
             )
 
         # -------------------------------------------------
-        # Update member
+        # Update member fields
         # -------------------------------------------------
 
         member.name = name
-
         member.phone = phone
-
         member.email = email
 
         member.plan = selected_plan
 
         member.height = height
-
         member.weight = weight
-
         member.bmi = bmi
 
         member.goal = goal
-
         member.food_category = food_category
 
         member.age = request.data.get(
@@ -1637,7 +1560,6 @@ def update_member(request, member_id):
         )
 
         member.paid_amount = paid_amount
-
         member.due_amount = due_amount
 
         if join_date:
@@ -1646,23 +1568,34 @@ def update_member(request, member_id):
         member.expiry_date = expiry_date
 
         # -------------------------------------------------
-        # Photo
+        # PHOTO HANDLING - IMPORTANT FOR EXCEL IMPORT
         # -------------------------------------------------
 
-        photo = request.FILES.get("photo")
+        new_photo = request.FILES.get("photo")
 
-        if photo:
-            member.photo = photo
+        if new_photo:
+            # Replace existing imported photo only
+            # when a new photo is uploaded.
+            member.photo = new_photo
+
+        # If no new photo is uploaded, preserve
+        # the existing Excel-imported Cloudinary image.
+
+        # -------------------------------------------------
+        # Save
+        # -------------------------------------------------
 
         member.save()
 
         return JsonResponse(
             {
-                "message":
-                "Member updated successfully",
-
-                "member_id":
-                member.id,
+                "message": "Member updated successfully",
+                "member_id": member.id,
+                "photo": (
+                    member.photo.url
+                    if member.photo
+                    else None
+                )
             },
             status=200
         )
@@ -1670,20 +1603,14 @@ def update_member(request, member_id):
     except Member.DoesNotExist:
 
         return JsonResponse(
-            {
-                "error":
-                "Member not found"
-            },
+            {"error": "Member not found"},
             status=404
         )
 
     except Exception as e:
 
         return JsonResponse(
-            {
-                "error":
-                str(e)
-            },
+            {"error": str(e)},
             status=500
         )
 

@@ -60,6 +60,13 @@ class CustomUser(AbstractUser):
 
 class Member(TenantBaseModel):
     id = models.CharField(max_length=100, primary_key=True)
+    # Remove this
+    mbid = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        db_index=True
+    )
     name = models.CharField(max_length=255, null=True, blank=True)
     phone = models.CharField(max_length=20)
     email = models.EmailField(blank=True, null=True)
