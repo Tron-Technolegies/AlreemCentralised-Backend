@@ -74,7 +74,6 @@ ESSL_EMPLOYEE_LOCATION = os.getenv("ESSL_EMPLOYEE_LOCATION", "TCR")
 
 
 # settings.py
-EXERCISE_API_KEY = os.getenv("EXERCISE_API_KEY")
 
 EBIOSERVER_API_URL = os.getenv(
     "EBIOSERVER_API_URL",
@@ -131,16 +130,16 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.postgresql',
-#         'NAME': os.getenv('DB_NAME'),
-#         'HOST': os.getenv('DB_HOST'),
-#         'PORT': os.getenv('DB_PORT'),
-#         'USER': os.getenv('DB_USER'),
-#         'PASSWORD': os.getenv('DB_PASSWORD'),
-#     }
-# }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.getenv('DB_NAME'),
+        'HOST': os.getenv('DB_HOST'),
+        'PORT': os.getenv('DB_PORT'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+    }
+}
 
 
 # DATABASES = {
@@ -150,6 +149,9 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 #     }
 # }
 
+EXERCISE_API_KEY = os.getenv(
+    "EXERCISE_API_KEY"
+)
 
 # import dj_database_url
 
