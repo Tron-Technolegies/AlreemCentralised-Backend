@@ -74,6 +74,7 @@ ESSL_EMPLOYEE_LOCATION = os.getenv("ESSL_EMPLOYEE_LOCATION", "TCR")
 
 
 # settings.py
+EXERCISE_API_KEY = os.getenv("EXERCISE_API_KEY")
 
 EBIOSERVER_API_URL = os.getenv(
     "EBIOSERVER_API_URL",
@@ -149,17 +150,14 @@ WSGI_APPLICATION = 'alreem.wsgi.application'
 #     }
 # }
 
-EXERCISE_API_KEY = os.getenv(
-    "EXERCISE_API_KEY"
-)
 
-import dj_database_url
+# import dj_database_url
 
-DATABASES = {
-    "default": dj_database_url.config(
-        default=os.environ.get("DB_URL")
-    )
-}
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         default=os.environ.get("DB_URL")
+#     )
+# }
 
 # GENERATE_EXERCISE_IMAGES = FALse
 HF_TOKEN = os.getenv("HF_TOKEN")
