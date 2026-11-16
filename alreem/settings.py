@@ -155,14 +155,14 @@ EXERCISE_API_KEY = os.getenv(
 
 # Database Configuration
 
-import dj_database_url
+# import dj_database_url
 
-DATABASES = {
-    "default": dj_database_url.config(
-        env="DATABASE_URL",
-        conn_max_age=600,
-    )
-}
+# DATABASES = {
+#     "default": dj_database_url.config(
+#         env="DATABASE_URL",
+#         conn_max_age=600,
+#     )
+# }
 
 # GENERATE_EXERCISE_IMAGES = FALse
 HF_TOKEN = os.getenv("HF_TOKEN")
