@@ -1203,6 +1203,7 @@ def get_member(request, member_id):
         return JsonResponse(
             {
                 "id": member.id,
+                "mbid": member.mbid,
                 "name": member.name,
                 "phone": member.phone,
                 "email": member.email,
@@ -1283,7 +1284,6 @@ def get_member(request, member_id):
         return JsonResponse({"error": "Member not found"},status=404)
     except Exception as e:
         return JsonResponse({"error": str(e)},status=500)
-    
     
 
 
