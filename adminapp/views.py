@@ -954,7 +954,8 @@ def get_members(request):
             **get_branch_filter(request, tenant)
         )
         .select_related("plan", "branch")
-        .order_by("-id")
+        # .order_by("-id")
+        .order_by("-mbid")
     )
 
     data = []
