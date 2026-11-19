@@ -22,6 +22,7 @@ COLUMN_MAPPING = {
     "MBGENDER": "gender",
     "MBAGE": "age",
     "MBJOINDT": "join_date",
+    "MBDUEDT": "expiry_date",  # NEW FIELD
     "MBADDR1": "location",
 }
 
@@ -71,7 +72,8 @@ def convert_value(value, field):
 
     field_type = field.get_internal_type()
 
-    if field.name == "join_date":
+    # UPDATED: Handle both join_date and expiry_date.
+    if field.name in ("join_date", "expiry_date"):
         if isinstance(value, datetime):
             return value.strftime("%Y-%m-%d")
 

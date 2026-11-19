@@ -1197,6 +1197,11 @@ def get_member(request, member_id):
             0, policy["max_requests"] - pause_count
         )
 
+
+        print("MEMBER ID:", member.id)
+        print("MBID:", member.mbid)
+        print("EXPIRY DATE:", member.expiry_date)
+        print("DATABASE:", member._state.db)
         # -------------------------------------------------
         # Response
         # -------------------------------------------------
